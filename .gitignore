@@ -1,0 +1,9 @@
+node_modules
+dist
+backend/dist
+frontend/dist
+.env
+server/data/db.json
+*.log
+verification-*.png
+*.tsbuildinfo
