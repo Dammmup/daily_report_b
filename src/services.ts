@@ -2,7 +2,7 @@ import type { Types } from "mongoose";
 import { askGroqAssistant, reviewReport } from "./ai.js";
 import { addDays, categories, todayIso } from "./constants.js";
 import { AttendanceModel, PlanModel, ReportModel, SurveyModel, UserModel, type UserDocument } from "./models.js";
-import type { Category, PlanFitCandidate } from "./types.js";
+import type { Category, DecisionCenter, PlanFitCandidate } from "./types.js";
 
 export function publicUser(user: UserDocument) {
   return {
@@ -372,5 +372,88 @@ ${context || "Кандидатов нет"}
     },
     candidates,
     fallbackUsed
+  };
+}
+
+export async function buildDecisionCenter(category?: Category): Promise<DecisionCenter> {
+  const dashboard = await buildDashboard(category);
+  const aiSummary = await buildAiSummary(category);
+  const plan = category ? await PlanModel.findOne({ category }) : await PlanModel.findOne().sort({ updatedAt: -1 });
+  const planFit = plan
+    ? await buildPlanFitAssistant({
+        requester: { role: "admin", category: undefined } as UserDocument,
+        question: "Кого лучше поставить на текущий план проекта?",
+        planId: plan.id
+      })
+    : { candidates: [] as PlanFitCandidate[] };
+
+  const today = todayIso();
+  const missingReports = dashboard.interns
+    .filter((intern) => !dashboard.reports.some((report) => report.userId.toString() === intern.id && report.date === today))
+    .map((intern) => ({
+      id: intern.id,
+      name: intern.name,
+      email: intern.email,
+      role: intern.role,
+      category: intern.category,
+      categoryLabel: intern.categoryLabel,
+      avatarColor: intern.avatarColor,
+      firstLoginCompleted: intern.firstLoginCompleted,
+      emailVerified: intern.emailVerified,
+      lastActiveAt: intern.lastActiveAt
+    }));
+
+  const attention = aiSummary.interns
+    .filter((intern) => intern.stats.averageScore > 0 && (intern.stats.averageScore < 65 || intern.stats.blockerReports > 0))
+    .slice(0, 5)
+    .map((intern) => ({
+      user: intern.user,
+      reason:
+        intern.stats.averageScore < 65
+          ? `Низкая средняя продуктивность: ${intern.stats.averageScore}%`
+          : `Есть блокеры в дэйликах: ${intern.stats.blockerReports}`,
+      severity: intern.stats.averageScore < 50 ? ("high" as const) : intern.stats.blockerReports > 1 ? ("medium" as const) : ("low" as const)
+    }));
+
+  const blockerReports: DecisionCenter["blockerReports"] = dashboard.reports
+    .filter((report) => report.blockers?.trim())
+    .slice(0, 5)
+    .flatMap((report) => {
+      const user = dashboard.interns.find((intern) => intern.id === report.userId.toString());
+      if (!user) return [];
+      return [{
+        user: user
+          ,
+        date: report.date,
+        blockers: report.blockers,
+        aiSummary: report.aiReview?.summary
+      }];
+    });
+
+  const recommended = planFit.candidates.slice(0, 3);
+  const summary = [
+    plan ? `Активный план: ${plan.title}.` : "Активный план не найден.",
+    recommended.length ? `Лучший кандидат: ${recommended[0].user.name} (${recommended[0].score}/100).` : "Нет кандидатов с AI-профилем для рекомендации.",
+    missingReports.length ? `Не сдали дэйлик сегодня: ${missingReports.length}.` : "Все стажеры сдали дэйлики или список пуст.",
+    attention.length ? `В зоне внимания: ${attention.length}.` : "Критичных просадок по стажерам не видно."
+  ].join(" ");
+
+  return {
+    scope: category ? "department" : "all",
+    plan: plan
+      ? {
+          id: plan.id,
+          title: plan.title,
+          category: plan.category as Category,
+          categoryLabel: categories[plan.category as Category],
+          adjustedDeadline: plan.adjustedDeadline,
+          milestones: plan.milestones
+        }
+      : undefined,
+    recommended,
+    attention,
+    missingReports,
+    blockerReports,
+    summary
   };
 }

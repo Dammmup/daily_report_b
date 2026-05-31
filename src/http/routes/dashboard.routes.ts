@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { UserModel } from "../../models.js";
-import { buildAiSummary, buildDashboard, buildInternAiProfile } from "../../services.js";
+import { buildAiSummary, buildDashboard, buildDecisionCenter, buildInternAiProfile } from "../../services.js";
 import type { Category } from "../../types.js";
 import { auth, requireRole, type AuthedRequest } from "../middleware/auth.js";
 import { publicUser, serializeReport } from "../serializers.js";
@@ -22,6 +22,14 @@ dashboardRouter.get("/dashboard", auth, requireRole("lead"), async (req: AuthedR
 
 dashboardRouter.get("/ai-summary", auth, requireRole("lead"), async (req: AuthedRequest, res) => {
   res.json(await buildAiSummary(req.user?.category as Category | undefined));
+});
+
+dashboardRouter.get("/decision-center", auth, requireRole("lead"), async (req: AuthedRequest, res) => {
+  if (!req.user?.category) {
+    res.status(400).json({ message: "Сначала выберите департамент" });
+    return;
+  }
+  res.json(await buildDecisionCenter(req.user?.category as Category | undefined));
 });
 
 dashboardRouter.get("/interns/:id", auth, requireRole("lead"), async (req: AuthedRequest, res) => {

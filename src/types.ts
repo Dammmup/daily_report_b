@@ -128,3 +128,29 @@ export type PlanFitCandidate = {
   averageScore: number;
   reportsCount: number;
 };
+
+export type DecisionCenter = {
+  scope: "department" | "all";
+  plan?: {
+    id: string;
+    title: string;
+    category: Category;
+    categoryLabel: string;
+    adjustedDeadline: string;
+    milestones: string[];
+  };
+  recommended: PlanFitCandidate[];
+  attention: {
+    user: User;
+    reason: string;
+    severity: "low" | "medium" | "high";
+  }[];
+  missingReports: User[];
+  blockerReports: {
+    user: User;
+    date: string;
+    blockers: string;
+    aiSummary?: string;
+  }[];
+  summary: string;
+};

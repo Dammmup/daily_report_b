@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { PlanModel, UserModel } from "../../models.js";
-import { buildAiSummary, buildDashboard, buildInternAiProfile } from "../../services.js";
+import { buildAiSummary, buildDashboard, buildDecisionCenter, buildInternAiProfile } from "../../services.js";
 import { auth, requireRole, type AuthedRequest } from "../middleware/auth.js";
 import { adminUserUpdateSchema } from "../schemas.js";
 import { publicUser, serializePlan, serializeReport } from "../serializers.js";
@@ -27,6 +27,10 @@ adminRouter.get("/admin/dashboard", auth, requireRole("admin"), async (_req: Aut
 
 adminRouter.get("/admin/ai-summary", auth, requireRole("admin"), async (_req: AuthedRequest, res) => {
   res.json(await buildAiSummary());
+});
+
+adminRouter.get("/admin/decision-center", auth, requireRole("admin"), async (_req: AuthedRequest, res) => {
+  res.json(await buildDecisionCenter());
 });
 
 adminRouter.get("/admin/interns/:id", auth, requireRole("admin"), async (req: AuthedRequest, res) => {
