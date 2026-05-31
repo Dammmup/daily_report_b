@@ -37,6 +37,34 @@ async function callGroq(prompt: string) {
   return data.choices?.[0]?.message?.content;
 }
 
+export async function askGroqAssistant(prompt: string) {
+  if (!process.env.GROQ_API_KEY) return undefined;
+
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: groqModel,
+      temperature: 0.25,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Ты AI-ассистент тимлида в mini ERP. Отвечай по-русски, кратко и доказательно. Не выдумывай данные, опирайся только на переданный контекст."
+        },
+        { role: "user", content: prompt }
+      ]
+    })
+  });
+
+  if (!response.ok) return undefined;
+  const data = (await response.json()) as { choices?: { message?: { content?: string } }[] };
+  return data.choices?.[0]?.message?.content;
+}
+
 function normalizeReview(review: Partial<AiReview>, model: string): AiReview {
   return {
     productivityScore: Math.max(0, Math.min(100, Number(review.productivityScore || 0))),

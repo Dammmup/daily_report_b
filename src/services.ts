@@ -1,8 +1,8 @@
 import type { Types } from "mongoose";
-import { reviewReport } from "./ai.js";
+import { askGroqAssistant, reviewReport } from "./ai.js";
 import { addDays, categories, todayIso } from "./constants.js";
 import { AttendanceModel, PlanModel, ReportModel, SurveyModel, UserModel, type UserDocument } from "./models.js";
-import type { Category } from "./types.js";
+import type { Category, PlanFitCandidate } from "./types.js";
 
 export function publicUser(user: UserDocument) {
   return {
@@ -10,7 +10,7 @@ export function publicUser(user: UserDocument) {
     name: user.name,
     email: user.email,
     role: user.role,
-    category: user.category,
+    category: user.category || undefined,
     categoryLabel: user.category ? categories[user.category as Category] : undefined,
     avatarColor: user.avatarColor,
     firstLoginCompleted: user.firstLoginCompleted,
@@ -219,4 +219,158 @@ export async function formatLeadSummary(category?: Category, content: "productiv
   if (content === "productivity") return productivity.join("\n");
   if (content === "reports") return [header, ...reports].join("\n");
   return [...productivity, ...reports].join("\n");
+}
+
+function textOf(value: unknown): string {
+  if (!value) return "";
+  if (Array.isArray(value)) return value.join(" ");
+  if (typeof value === "object") return Object.values(value as Record<string, unknown>).map(textOf).join(" ");
+  return String(value);
+}
+
+function scoreCandidate(planText: string, surveyText: string, averageScore: number, sameDepartment: boolean) {
+  const planWords = new Set(
+    planText
+      .toLowerCase()
+      .split(/[^a-zа-я0-9+#]+/i)
+      .filter((word) => word.length > 3)
+  );
+  const surveyWords = new Set(
+    surveyText
+      .toLowerCase()
+      .split(/[^a-zа-я0-9+#]+/i)
+      .filter((word) => word.length > 3)
+  );
+  const overlaps = [...planWords].filter((word) => surveyWords.has(word)).length;
+  return Math.min(100, Math.round(overlaps * 12 + averageScore * 0.35 + (sameDepartment ? 18 : 0)));
+}
+
+export async function buildPlanFitAssistant(input: {
+  requester: UserDocument;
+  question: string;
+  planId?: string;
+}) {
+  const plan =
+    input.planId && input.requester.role === "admin"
+      ? await PlanModel.findById(input.planId)
+      : input.requester.category
+        ? await PlanModel.findOne({ category: input.requester.category })
+        : null;
+
+  if (!plan) {
+    return {
+      answer: "План проекта не найден. Тимлиду нужно сначала создать план департамента, а админу выбрать существующий план.",
+      plan: null,
+      candidates: [],
+      fallbackUsed: false
+    };
+  }
+
+  const [interns, surveys, reports] = await Promise.all([
+    UserModel.find({ role: "intern" }).sort({ name: 1 }),
+    SurveyModel.find(),
+    ReportModel.find().sort({ createdAt: -1 })
+  ]);
+
+  const planText = `${plan.title} ${plan.milestones.join(" ")} ${plan.aiRationale}`;
+  const rows = interns.map((user) => {
+    const survey = surveys.find((item) => item.userId.toString() === user.id);
+    const userReports = reports.filter((report) => report.userId.toString() === user.id);
+    const scores = userReports.map((report) => report.aiReview?.productivityScore || 0);
+    const averageScore = scores.length ? Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length) : 0;
+    const sameDepartment = user.category === plan.category;
+    const surveyText = `${textOf(survey?.answers)} ${textOf(survey?.analysis)}`;
+    const score = scoreCandidate(planText, surveyText, averageScore, sameDepartment);
+
+    return {
+      user,
+      survey,
+      score,
+      averageScore,
+      reportsCount: userReports.length,
+      sameDepartment
+    };
+  });
+
+  const primary = rows.filter((row) => row.sameDepartment && row.survey).sort((a, b) => b.score - a.score);
+  const fallback = rows.filter((row) => !row.sameDepartment && row.survey).sort((a, b) => b.score - a.score);
+  const finalRows = (primary.length ? primary : fallback.length ? fallback : rows.sort((a, b) => b.score - a.score)).slice(0, 5);
+  const fallbackUsed = !primary.length && finalRows.some((row) => !row.sameDepartment);
+
+  const candidates: PlanFitCandidate[] = finalRows.map((row) => {
+    const analysis = row.survey?.analysis;
+    const strengths = analysis?.strengths?.slice(0, 3).join(", ");
+    const skills = analysis?.skillsSummary || "AI-сводка навыков отсутствует";
+    const risks = [
+      ...(analysis?.weaknesses?.slice(0, 2) || []),
+      row.reportsCount ? "" : "нет истории дэйликов для проверки темпа"
+    ].filter(Boolean);
+
+    return {
+      user: publicUser(row.user),
+      score: row.score,
+      matchReason: strengths
+        ? `Совпадает с планом по профилю: ${strengths}. ${skills}`
+        : `Подбор сделан по продуктивности и доступным данным. ${skills}`,
+      risks,
+      source: row.sameDepartment ? "same_department" : "other_department",
+      surveyAnalysis: analysis,
+      averageScore: row.averageScore,
+      reportsCount: row.reportsCount
+    };
+  });
+
+  const context = candidates
+    .map((candidate) =>
+      [
+        `Имя: ${candidate.user.name}`,
+        `Департамент: ${candidate.user.categoryLabel || candidate.user.category || "не выбран"}`,
+        `Скор: ${candidate.score}`,
+        `Средняя продуктивность: ${candidate.averageScore}%`,
+        `AI-профиль: ${candidate.matchReason}`,
+        `Риски: ${candidate.risks.join("; ") || "нет явных"}`
+      ].join("\n")
+    )
+    .join("\n\n");
+
+  const aiAnswer = await askGroqAssistant(`
+Вопрос тимлида/админа: ${input.question}
+
+План:
+Название: ${plan.title}
+Департамент: ${categories[plan.category as Category]}
+Дедлайн: ${plan.adjustedDeadline}
+Этапы: ${plan.milestones.join("; ")}
+
+Кандидаты, выбранные системой по AI-профилям миниопроса:
+${context || "Кандидатов нет"}
+
+Ответь: сможет ли кто-то из стажеров выполнить план, кого выбрать, почему, какие риски и кого подтянуть из другого департамента, если подбор fallback.
+`);
+
+  const localAnswer = candidates.length
+    ? [
+        fallbackUsed
+          ? "В выбранном департаменте нет стажеров с достаточно заполненным AI-профилем, поэтому я подобрал кандидатов из других департаментов."
+          : "По AI-профилям миниопроса есть кандидаты внутри департамента плана.",
+        `Лучший кандидат: ${candidates[0].user.name} (${candidates[0].score}/100).`,
+        candidates[0].matchReason,
+        candidates[0].risks.length ? `Риски: ${candidates[0].risks.join("; ")}.` : "Критичных рисков по профилю не видно.",
+        "Финальное решение лучше подтвердить коротким созвоном и первым контрольным дэйликом."
+      ].join("\n")
+    : "Не нашел стажеров для подбора. Нужно, чтобы стажеры выбрали департамент и прошли миниопрос.";
+
+  return {
+    answer: aiAnswer || localAnswer,
+    plan: {
+      id: plan.id,
+      title: plan.title,
+      category: plan.category,
+      categoryLabel: categories[plan.category as Category],
+      adjustedDeadline: plan.adjustedDeadline,
+      milestones: plan.milestones
+    },
+    candidates,
+    fallbackUsed
+  };
 }

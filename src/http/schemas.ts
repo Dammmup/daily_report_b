@@ -67,3 +67,8 @@ export const telegramDigestSchema = z.object({
   time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
   content: z.enum(["productivity", "reports", "full"])
 });
+
+export const assistantPlanFitSchema = z.object({
+  question: z.string().min(5).max(1200),
+  planId: z.string().optional()
+});

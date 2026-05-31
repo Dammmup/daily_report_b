@@ -11,7 +11,7 @@ export function publicUser(user: UserDocument) {
     name: user.name,
     email: user.email,
     role: user.role,
-    category: user.category,
+    category: user.category || undefined,
     categoryLabel: user.category ? categories[user.category as Category] : undefined,
     avatarColor: user.avatarColor,
     firstLoginCompleted: user.firstLoginCompleted,

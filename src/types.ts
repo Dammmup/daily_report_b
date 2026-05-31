@@ -9,9 +9,10 @@ export type Category =
 export type User = {
   id: string;
   name: string;
-  email: string;
+  email?: string | null;
   role: Role;
   category?: Category;
+  categoryLabel?: string;
   avatarColor: string;
   firstLoginCompleted: boolean;
   emailVerified: boolean;
@@ -115,4 +116,15 @@ export type Database = {
   reports: DailyReport[];
   surveys: Survey[];
   plans: ProjectPlan[];
+};
+
+export type PlanFitCandidate = {
+  user: User;
+  score: number;
+  matchReason: string;
+  risks: string[];
+  source: "same_department" | "other_department";
+  surveyAnalysis?: StrengthProfile;
+  averageScore: number;
+  reportsCount: number;
 };
