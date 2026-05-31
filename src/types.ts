@@ -20,6 +20,10 @@ export type User = {
   telegramDigestEnabled?: boolean;
   telegramDigestTime?: string;
   telegramDigestContent?: "productivity" | "reports" | "full";
+  telegramUsername?: string;
+  telegramActivityMessages?: number;
+  telegramActivityScore?: number;
+  telegramActivitySummary?: string;
   lastActiveAt: string;
 };
 

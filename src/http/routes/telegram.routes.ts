@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { handleTelegramWebhook } from "../../telegram.js";
+import { handleTelegramWebhook, sendWeekdayGroupMotivation } from "../../telegram.js";
 import { auth, requireRole, type AuthedRequest } from "../middleware/auth.js";
 import { telegramDigestSchema } from "../schemas.js";
 import { publicUser } from "../serializers.js";
@@ -33,6 +33,22 @@ telegramRouter.post("/telegram/webhook", async (req, res, next) => {
   try {
     await handleTelegramWebhook(req.body);
     res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+telegramRouter.post("/telegram/motivation-cron", async (req, res, next) => {
+  try {
+    const secret = process.env.CRON_SECRET;
+    const authHeader = req.header("authorization");
+    if (secret && authHeader !== `Bearer ${secret}` && req.header("x-cron-secret") !== secret && req.query.secret !== secret) {
+      res.status(401).json({ message: "Unauthorized cron request" });
+      return;
+    }
+
+    const result = await sendWeekdayGroupMotivation();
+    res.json({ ok: true, ...result });
   } catch (error) {
     next(error);
   }

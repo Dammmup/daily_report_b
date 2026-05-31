@@ -20,6 +20,10 @@ export function publicUser(user: UserDocument) {
     telegramDigestEnabled: user.telegramDigestEnabled,
     telegramDigestTime: user.telegramDigestTime,
     telegramDigestContent: user.telegramDigestContent,
+    telegramUsername: user.telegramUsername,
+    telegramActivityMessages: user.telegramActivityMessages,
+    telegramActivityScore: user.telegramActivityScore,
+    telegramActivitySummary: user.telegramActivitySummary,
     lastActiveAt: user.lastActiveAt.toISOString()
   };
 }

@@ -1,5 +1,8 @@
 import { Markup, Telegraf, type Context } from "telegraf";
-import { PlanModel, UserModel } from "./models.js";
+import { hashPassword } from "./auth.js";
+import { askGroqAssistant } from "./ai.js";
+import { categories, randomAvatarColor } from "./constants.js";
+import { PlanModel, TelegramActivityModel, TelegramGroupModel, UserModel } from "./models.js";
 import { createDailyReport, formatLeadSummary } from "./services.js";
 import type { Category } from "./types.js";
 
@@ -19,6 +22,24 @@ const inlineMenu = Markup.inlineKeyboard([
   [Markup.button.callback("Сводка", "summary:view"), Markup.button.callback("Автосводка", "digest:view")],
   [Markup.button.callback("Привязка Telegram", "link:help")]
 ]);
+
+const departmentKeywords: Record<Category, string[]> = {
+  "data-system-ml": ["data", "данн", "аналит", "system", "систем", "ml", "machine", "машин"],
+  "marketing-sales": ["marketing", "маркет", "sales", "продаж"],
+  "erp-development": ["erp", "разработ", "dev", "frontend", "backend"],
+  "data-security": ["security", "безопас", "защит", "данных"]
+};
+
+const categoryAliases: Record<string, Category> = {
+  data: "data-system-ml",
+  analytics: "data-system-ml",
+  ml: "data-system-ml",
+  marketing: "marketing-sales",
+  sales: "marketing-sales",
+  erp: "erp-development",
+  dev: "erp-development",
+  security: "data-security"
+};
 
 function parseReport(text: string) {
   const lines = text
@@ -74,21 +95,311 @@ function isServerlessRuntime() {
   return process.env.VERCEL === "1" || process.env.TELEGRAM_BOT_MODE === "webhook";
 }
 
+function detectCategoryFromGroupTitle(title: string): Category | undefined {
+  const normalized = title.toLowerCase();
+  const match = Object.entries(departmentKeywords).find(([, keywords]) => keywords.some((keyword) => normalized.includes(keyword)));
+  return match?.[0] as Category | undefined;
+}
+
+function parseCategoryAlias(value?: string) {
+  if (!value) return undefined;
+  return categoryAliases[value.trim().toLowerCase()];
+}
+
+function categoryHelp() {
+  return [
+    "Департаменты:",
+    "/group_department data",
+    "/group_department marketing",
+    "/group_department erp",
+    "/group_department security"
+  ].join("\n");
+}
+
+function getTextFromMessage(ctx: Context) {
+  const message = ctx.message;
+  if (!message || !("text" in message)) return "";
+  return message.text.trim();
+}
+
+function buildTelegramName(from: NonNullable<Context["from"]>) {
+  return [from.first_name, from.last_name].filter(Boolean).join(" ") || from.username || `Telegram ${from.id}`;
+}
+
+function localActivitySummary(messages: string[]) {
+  const text = messages.join(" ").toLowerCase();
+  const hasProgress = /(сделал|готов|закрыл|исправил|реализовал|проверил|добавил|собрал|done|fixed|ready)/i.test(text);
+  const hasBlocker = /(не получается|ошибка|блокер|проблем|завис|сломал|не работает|bug|error|blocked)/i.test(text);
+  const hasQuestion = /(\?|как|почему|можно ли|подскаж|help)/i.test(text);
+  const score = Math.max(10, Math.min(100, 45 + (hasProgress ? 25 : 0) + (hasQuestion ? 10 : 0) - (hasBlocker ? 15 : 0)));
+  const summary = [
+    hasProgress ? "Есть признаки рабочего прогресса." : "Пока мало явных сообщений о завершенных задачах.",
+    hasQuestion ? "Стажер задает вопросы и вовлекается в обсуждение." : "Вопросов в последних сообщениях немного.",
+    hasBlocker ? "Встречаются признаки блокеров, тимлиду стоит проверить контекст." : "Критичных блокеров по чату не видно."
+  ].join(" ");
+  return { score, summary };
+}
+
+async function buildAiActivitySummary(messages: string[]) {
+  const fallback = localActivitySummary(messages);
+  const answer = await askGroqAssistant(`
+Проанализируй активность стажера в Telegram-группе департамента.
+Дай одну короткую сводку на русском: прогресс, вовлеченность, риски. Не выдумывай факты.
+Сообщения:
+${messages.join("\n")}
+`);
+  return answer ? { ...fallback, summary: answer.slice(0, 700) } : fallback;
+}
+
+async function trackGroupMessage(ctx: Context) {
+  if (ctx.chat?.type !== "group" && ctx.chat?.type !== "supergroup") return;
+  if (!ctx.from || ctx.from.is_bot) return;
+
+  const text = getTextFromMessage(ctx);
+  if (!text || text.startsWith("/")) return;
+
+  const title = "title" in ctx.chat ? ctx.chat.title : "";
+  const category = detectCategoryFromGroupTitle(title);
+  if (!category) return;
+
+  const now = new Date();
+  const chatId = String(ctx.chat.id);
+  const telegramUserId = String(ctx.from.id);
+  const username = ctx.from.username?.toLowerCase();
+
+  const group = await TelegramGroupModel.findOneAndUpdate(
+    { chatId },
+    {
+      chatId,
+      title,
+      category,
+      lastActivityAt: now
+    },
+    { upsert: true, new: true }
+  );
+
+  let user = await UserModel.findOne({ telegramUserId });
+  if (!user && username) user = await UserModel.findOne({ telegramUsername: username });
+  if (!user) {
+    user = await UserModel.create({
+      name: buildTelegramName(ctx.from),
+      role: "intern",
+      category,
+      avatarColor: randomAvatarColor(),
+      firstLoginCompleted: false,
+      emailVerified: false,
+      telegramUserId,
+      telegramUsername: username,
+      telegramGroupChatId: chatId,
+      registrationSource: "telegram_group",
+      passwordHash: hashPassword(`telegram-${telegramUserId}-${Date.now()}`)
+    });
+    group.membersSeen += 1;
+    await group.save();
+  } else {
+    user.name = user.name || buildTelegramName(ctx.from);
+    user.telegramUserId = user.telegramUserId || telegramUserId;
+    if (username) user.telegramUsername = username;
+    user.telegramGroupChatId = chatId;
+    user.category = user.category || category;
+  }
+
+  await TelegramActivityModel.create({
+    userId: user._id,
+    chatId,
+    text: text.slice(0, 1000),
+    messageAt: now
+  });
+
+  user.telegramActivityMessages = (user.telegramActivityMessages || 0) + 1;
+  user.telegramLastGroupSeenAt = now;
+  user.lastActiveAt = now;
+
+  if (user.telegramActivityMessages % 10 === 0 || !user.telegramActivitySummary) {
+    const recent = await TelegramActivityModel.find({ userId: user._id }).sort({ messageAt: -1 }).limit(12);
+    const summary = await buildAiActivitySummary(recent.reverse().map((item) => item.text));
+    user.telegramActivityScore = summary.score;
+    user.telegramActivitySummary = summary.summary;
+  }
+
+  await user.save();
+
+  if (user.telegramActivityMessages === 1) {
+    await ctx.reply(
+      `${buildTelegramName(ctx.from)}, я добавил вас в список стажеров департамента. Чтобы завершить регистрацию, откройте личный диалог с ботом и нажмите /start.`,
+      Markup.inlineKeyboard([[Markup.button.url("Открыть бота", `https://t.me/${ctx.botInfo?.username || ""}`)]])
+    );
+  }
+}
+
+async function setGroupDepartment(ctx: Context) {
+  if (ctx.chat?.type !== "group" && ctx.chat?.type !== "supergroup") {
+    await ctx.reply("Эта команда работает только в группе департамента.");
+    return;
+  }
+
+  const text = getTextFromMessage(ctx);
+  const category = parseCategoryAlias(text.split(/\s+/)[1]);
+  if (!category) {
+    await ctx.reply(categoryHelp());
+    return;
+  }
+
+  const title = "title" in ctx.chat ? ctx.chat.title : "Telegram group";
+  const group = await TelegramGroupModel.findOneAndUpdate(
+    { chatId: String(ctx.chat.id) },
+    {
+      chatId: String(ctx.chat.id),
+      title,
+      category,
+      lastActivityAt: new Date()
+    },
+    { upsert: true, new: true }
+  );
+
+  await ctx.reply(`Группа привязана к департаменту: ${categories[category]}. Участников вижу: ${group.membersSeen}.`);
+}
+
+async function sendGroupStatus(ctx: Context) {
+  if (ctx.chat?.type !== "group" && ctx.chat?.type !== "supergroup") {
+    await ctx.reply("Эта команда работает только в группе департамента.");
+    return;
+  }
+
+  const group = await TelegramGroupModel.findOne({ chatId: String(ctx.chat.id) });
+  if (!group?.category) {
+    await ctx.reply(`Группа еще не привязана к департаменту.\n${categoryHelp()}`);
+    return;
+  }
+
+  const members = await UserModel.countDocuments({ telegramGroupChatId: String(ctx.chat.id), role: "intern" });
+  const plan = await PlanModel.findOne({ category: group.category });
+  await ctx.reply(
+    [
+      `Департамент: ${categories[group.category as Category]}`,
+      `Стажеров найдено по чату: ${members}`,
+      `Мотивация: ${group.motivationEnabled ? "включена" : "выключена"}`,
+      plan ? `План: ${plan.title}, дедлайн ${plan.adjustedDeadline}` : "План департамента еще не создан"
+    ].join("\n")
+  );
+}
+
+async function setGroupMotivation(ctx: Context, enabled: boolean) {
+  if (ctx.chat?.type !== "group" && ctx.chat?.type !== "supergroup") {
+    await ctx.reply("Эта команда работает только в группе департамента.");
+    return;
+  }
+
+  const title = "title" in ctx.chat ? ctx.chat.title : "Telegram group";
+  const category = detectCategoryFromGroupTitle(title);
+  const group = await TelegramGroupModel.findOneAndUpdate(
+    { chatId: String(ctx.chat.id) },
+    {
+      chatId: String(ctx.chat.id),
+      title,
+      ...(category ? { category } : {}),
+      motivationEnabled: enabled
+    },
+    { upsert: true, new: true }
+  );
+
+  await ctx.reply(`Будничная мотивация ${group.motivationEnabled ? "включена" : "выключена"}.`);
+}
+
+async function buildMotivationMessage(category: Category) {
+  const [plan, interns] = await Promise.all([
+    PlanModel.findOne({ category }),
+    UserModel.find({ role: "intern", category }).sort({ telegramActivityScore: -1 }).limit(5)
+  ]);
+  const openSteps = (plan?.steps || []).filter((step) => step.status !== "done").slice(0, 4);
+  const activeNames = interns.filter((user) => (user.telegramActivityMessages || 0) > 0).map((user) => user.name).slice(0, 4);
+
+  const fallback = [
+    `Доброе утро, ${categories[category]}.`,
+    plan ? `Фокус по плану "${plan.title}": ${openSteps.map((step) => step.title).join("; ") || "держим текущий темп"}.` : "Сегодня держим фокус на задачах департамента.",
+    activeNames.length ? `Отдельно вижу активность: ${activeNames.join(", ")}. Хороший ритм.` : "Пишите вопросы и блокеры в чат, так тимлид быстрее поможет.",
+    "Коротко зафиксируйте прогресс в дэйлике и не тяните с блокерами."
+  ].join("\n");
+
+  const ai = await askGroqAssistant(`
+Сгенерируй короткое мотивирующее сообщение в Telegram-группу стажеров.
+Тон: дружелюбно, без пафоса, 3-5 предложений.
+Департамент: ${categories[category]}
+План: ${plan?.title || "план еще не создан"}
+Дедлайн: ${plan?.adjustedDeadline || "не задан"}
+Открытые шаги: ${openSteps.map((step) => `${step.title} до ${step.deadline}`).join("; ") || "нет данных"}
+Активные стажеры: ${activeNames.join(", ") || "нет данных"}
+`);
+  return ai || fallback;
+}
+
+export async function sendWeekdayGroupMotivation() {
+  const bot = getTelegramBot();
+  if (!bot) throw new Error("Telegram bot is not configured");
+
+  const now = new Date();
+  const weekday = now.getUTCDay();
+  if (weekday === 0 || weekday === 6) return { sent: 0, skipped: "weekend" };
+
+  const dayKey = now.toISOString().slice(0, 10);
+  const groups = await TelegramGroupModel.find({
+    category: { $exists: true },
+    motivationEnabled: true
+  });
+
+  let sent = 0;
+  for (const group of groups) {
+    const lastSentDay = group.motivationLastSentAt?.toISOString().slice(0, 10);
+    if (lastSentDay === dayKey) continue;
+
+    const message = await buildMotivationMessage(group.category as Category);
+    await bot.telegram.sendMessage(group.chatId, message);
+    group.motivationLastSentAt = now;
+    await group.save();
+    sent += 1;
+  }
+
+  return { sent };
+}
+
 async function getLinkedUser(ctx: Context) {
   if (!ctx.chat?.id) return null;
   return UserModel.findOne({ telegramChatId: String(ctx.chat.id) });
 }
 
 async function sendMainMenu(ctx: Context) {
+  const user = await syncPrivateTelegramUser(ctx);
+  const registerHint =
+    user && !user.emailVerified
+      ? "\n\nЯ уже вижу вас в списке Telegram-группы. Завершите регистрацию на сайте/mini app: задайте email, пароль и пройдите мини-опрос."
+      : "";
   await ctx.reply(
     [
       "DailyReport ERP бот.",
       "Выберите действие кнопками снизу или через быстрые кнопки под сообщением.",
-      "Для привязки используйте: /link email@example.com"
+      "Для привязки используйте: /link email@example.com",
+      registerHint
     ].join("\n"),
     tileKeyboard
   );
   await ctx.reply("Быстрое меню:", inlineMenu);
+}
+
+async function syncPrivateTelegramUser(ctx: Context) {
+  if (ctx.chat?.type !== "private" || !ctx.from) return null;
+  const telegramUserId = String(ctx.from.id);
+  const username = ctx.from.username?.toLowerCase();
+  const user = await UserModel.findOne({
+    $or: [{ telegramUserId }, ...(username ? [{ telegramUsername: username }] : [])]
+  });
+  if (!user) return null;
+
+  user.telegramUserId = user.telegramUserId || telegramUserId;
+  if (username) user.telegramUsername = username;
+  user.telegramChatId = String(ctx.chat.id);
+  user.lastActiveAt = new Date();
+  await user.save();
+  return user;
 }
 
 async function sendLinkHelp(ctx: Context) {
@@ -222,6 +533,16 @@ export function getTelegramBot() {
   bot.hears("Сводка", (ctx) => sendSummary(ctx));
   bot.hears("Автосводка", (ctx) => sendDigestStatus(ctx));
 
+  bot.command("group_department", (ctx) => setGroupDepartment(ctx));
+  bot.command("group_status", (ctx) => sendGroupStatus(ctx));
+  bot.command("motivation_on", (ctx) => setGroupMotivation(ctx, true));
+  bot.command("motivation_off", (ctx) => setGroupMotivation(ctx, false));
+
+  bot.on("message", async (ctx, next) => {
+    await trackGroupMessage(ctx);
+    return next();
+  });
+
   bot.action("menu:view", async (ctx) => {
     await ctx.answerCbQuery();
     await sendMainMenu(ctx);
@@ -270,6 +591,8 @@ export function getTelegramBot() {
       }
 
       user.telegramChatId = String(ctx.chat.id);
+      user.telegramUserId = String(ctx.from.id);
+      if (ctx.from.username) user.telegramUsername = ctx.from.username.toLowerCase();
       await user.save();
       await ctx.reply(`Telegram привязан к профилю: ${user.name}`, tileKeyboard);
       await ctx.reply("Теперь можно пользоваться меню:", inlineMenu);
