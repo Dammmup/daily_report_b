@@ -2,15 +2,21 @@ import mongoose from "mongoose";
 import { hashPassword } from "./auth.js";
 import { UserModel } from "./models.js";
 
+let connectPromise: Promise<typeof mongoose> | undefined;
+let bootstrapPromise: Promise<void> | undefined;
+
 export async function connectMongo() {
   if (mongoose.connection.readyState === 1) {
     return;
   }
   const mongoUri = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/dailyreport_erp";
   mongoose.set("strictQuery", true);
-  await mongoose.connect(mongoUri);
-  await UserModel.cleanIndexes();
-  await seedAdmin();
+
+  connectPromise ||= mongoose.connect(mongoUri);
+  await connectPromise;
+
+  bootstrapPromise ||= seedAdmin();
+  await bootstrapPromise;
 }
 
 async function seedAdmin() {

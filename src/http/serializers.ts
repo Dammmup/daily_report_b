@@ -43,6 +43,13 @@ export function serializePlan(plan: PlanDocument | null) {
     ...item,
     id: plan.id,
     leadId: item.leadId?.toString(),
-    issues: item.issues.map((issue) => ({ ...issue, id: issue._id.toString() }))
+    steps: (item.steps || []).map((step) => ({
+      ...step,
+      id: step._id.toString(),
+      assignedTo: step.assignedTo?.toString()
+    })),
+    issues: item.issues.map((issue) => ({ ...issue, id: issue._id.toString() })),
+    createdAt: plan.createdAt.toISOString(),
+    updatedAt: plan.updatedAt.toISOString()
   };
 }

@@ -1,4 +1,4 @@
-import type { AiReview, DailyReport, StrengthProfile, Survey } from "./types.js";
+import type { AiReview, DailyReport, ProjectPlanStep, StrengthProfile, Survey } from "./types.js";
 
 const groqModel = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
 
@@ -63,6 +63,90 @@ export async function askGroqAssistant(prompt: string) {
   if (!response.ok) return undefined;
   const data = (await response.json()) as { choices?: { message?: { content?: string } }[] };
   return data.choices?.[0]?.message?.content;
+}
+
+function addIsoDays(date: string, days: number) {
+  const value = new Date(`${date}T00:00:00.000Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
+}
+
+function daysBetween(start: string, end: string) {
+  const startTime = new Date(`${start}T00:00:00.000Z`).getTime();
+  const endTime = new Date(`${end}T00:00:00.000Z`).getTime();
+  return Math.max(1, Math.round((endTime - startTime) / 86_400_000));
+}
+
+function fallbackPlanSteps(input: {
+  title: string;
+  milestones: string[];
+  startDate: string;
+  baseDeadline: string;
+}): Omit<ProjectPlanStep, "id">[] {
+  const totalDays = daysBetween(input.startDate, input.baseDeadline);
+  const count = Math.max(2, input.milestones.length);
+  return input.milestones.map((milestone, index) => ({
+    title: milestone,
+    description: `Рабочий шаг по плану "${input.title}". Тимлид может уточнить описание и назначить стажера.`,
+    deadline: addIsoDays(input.startDate, Math.min(totalDays, Math.ceil(((index + 1) / count) * totalDays))),
+    status: "todo",
+    source: "ai"
+  }));
+}
+
+export async function decomposeProjectPlan(input: {
+  title: string;
+  milestones: string[];
+  startDate: string;
+  baseDeadline: string;
+  categoryLabel: string;
+}): Promise<Omit<ProjectPlanStep, "id">[]> {
+  const fallback = fallbackPlanSteps(input);
+  const prompt = `
+Разбей план проекта на пошаговые действия для стажеров.
+Верни JSON:
+{
+  "steps": [
+    {
+      "title": "короткое действие",
+      "description": "что нужно сделать и какой результат ожидается",
+      "deadline": "YYYY-MM-DD"
+    }
+  ]
+}
+
+Правила:
+- 4-8 шагов.
+- Каждый шаг должен быть назначаемым одному стажеру.
+- Дедлайны должны быть между ${input.startDate} и ${input.baseDeadline}.
+- Не назначай людей, только опиши работы.
+- Учитывай департамент: ${input.categoryLabel}.
+
+План: ${input.title}
+Этапы: ${input.milestones.join("; ")}
+`;
+
+  const aiText = await callGroq(prompt);
+  if (!aiText) return fallback;
+  const parsed = extractJson(aiText);
+  if (!parsed) return fallback;
+
+  try {
+    const data = JSON.parse(parsed) as { steps?: { title?: string; description?: string; deadline?: string }[] };
+    const steps = (data.steps || [])
+      .filter((step) => step.title && /^\d{4}-\d{2}-\d{2}$/.test(step.deadline || ""))
+      .slice(0, 8)
+      .map((step) => ({
+        title: step.title!.slice(0, 120),
+        description: step.description || "",
+        deadline: step.deadline!,
+        status: "todo" as const,
+        source: "ai" as const
+      }));
+    return steps.length >= 2 ? steps : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 function normalizeReview(review: Partial<AiReview>, model: string): AiReview {

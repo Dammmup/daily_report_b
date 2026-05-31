@@ -97,8 +97,19 @@ export type ProjectPlan = {
   baseDeadline: string;
   adjustedDeadline: string;
   milestones: string[];
+  steps: ProjectPlanStep[];
   issues: ProjectIssue[];
   aiRationale: string;
+};
+
+export type ProjectPlanStep = {
+  id: string;
+  title: string;
+  description: string;
+  deadline: string;
+  status: "todo" | "in_progress" | "done";
+  assignedTo?: string;
+  source: "ai" | "manual";
 };
 
 export type ProjectIssue = {

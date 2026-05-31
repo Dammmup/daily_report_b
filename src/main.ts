@@ -22,13 +22,10 @@ if (!isVercel) {
     });
 }
 
-// Экспортируем функцию-обработчик для Vercel Serverless
+// Vercel Serverless handler. Telegram webhook is handled by the Express route.
 export default async function handler(req: any, res: any) {
   try {
     await connectMongo();
-    if (process.env.TELEGRAM_BOT_TOKEN) {
-      startTelegramBot();
-    }
   } catch (error) {
     console.error("Vercel Serverless init error:", error);
   }

@@ -53,6 +53,21 @@ export const planSchema = z.object({
   milestones: z.array(z.string()).min(2)
 });
 
+export const planStepCreateSchema = z.object({
+  title: z.string().min(3),
+  description: z.string().default(""),
+  deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  assignedTo: z.string().optional().or(z.literal(""))
+});
+
+export const planStepUpdateSchema = z.object({
+  title: z.string().min(3).optional(),
+  description: z.string().optional(),
+  deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  assignedTo: z.string().optional().nullable(),
+  status: z.enum(["todo", "in_progress", "done"]).optional()
+});
+
 export const departmentSchema = z.object({
   category: categorySchema
 });

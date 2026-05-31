@@ -11,6 +11,18 @@ const issueSchema = new Schema(
   { _id: true }
 );
 
+const stepSchema = new Schema(
+  {
+    title: { type: String, required: true },
+    description: { type: String, default: "" },
+    deadline: { type: String, required: true },
+    status: { type: String, enum: ["todo", "in_progress", "done"], default: "todo" },
+    assignedTo: { type: Schema.Types.ObjectId, ref: "User", required: false },
+    source: { type: String, enum: ["ai", "manual"], default: "ai" }
+  },
+  { _id: true, timestamps: true }
+);
+
 const planSchema = new Schema(
   {
     leadId: { type: Schema.Types.ObjectId, ref: "User", required: true },
@@ -27,6 +39,7 @@ const planSchema = new Schema(
     baseDeadline: { type: String, required: true },
     adjustedDeadline: { type: String, required: true },
     milestones: { type: [String], default: [] },
+    steps: { type: [stepSchema], default: [] },
     issues: { type: [issueSchema], default: [] },
     aiRationale: { type: String, required: true }
   },
