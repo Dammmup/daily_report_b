@@ -739,7 +739,7 @@ async function transcribeTelegramVoice(ctx: Context) {
 
   return transcribeAudio({
     buffer: await response.arrayBuffer(),
-    filename: "telegram-voice.oga",
+    filename: "telegram-voice.ogg",
     mimeType: message.voice.mime_type || "audio/ogg"
   });
 }
