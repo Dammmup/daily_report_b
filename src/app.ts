@@ -8,6 +8,9 @@ export function createApp() {
 
   app.use(cors());
   app.use(express.json({ limit: "1mb" }));
+  app.get("/", (_req, res) => {
+    res.json({ ok: true, service: "dailyreport-api", health: "/api/health" });
+  });
   app.use("/api", apiRouter);
   app.use(errorHandler);
 
