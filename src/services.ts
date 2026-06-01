@@ -4,6 +4,8 @@ import { addDays, categories, todayIso } from "./constants.js";
 import { AttendanceModel, PlanModel, ReportModel, SurveyModel, UserModel, type UserDocument } from "./models.js";
 import type { Category, DecisionCenter, PlanFitCandidate } from "./types.js";
 
+const activePlanFilter = { status: { $in: ["draft", "approved"] as const } } as any;
+
 export function publicUser(user: UserDocument) {
   return {
     id: user.id,
@@ -50,7 +52,7 @@ export async function createDailyReport(input: {
     aiReview
   });
 
-  const plan = await PlanModel.findOne({ category: user.category });
+  const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
   if (user.role === "intern" && plan && aiReview.deadlineImpactDays > 0) {
     plan.adjustedDeadline = addDays(plan.adjustedDeadline, aiReview.deadlineImpactDays);
     plan.aiRationale = `AI продлил срок на ${aiReview.deadlineImpactDays} дн. из-за блокера в дэйлике стажера.`;
@@ -98,11 +100,16 @@ export async function buildDashboard(category?: Category) {
     const userReports = scopedReports.filter((report) => report.userId.toString() === user.id);
     const scores = userReports.map((report) => report.aiReview?.productivityScore || 0);
     const survey = surveys.find((item) => item.userId.toString() === user.id);
-    const plan = plans.find((item) => item.category === user.category);
+    const plan = plans
+      .filter((item) => item.category === user.category && ["draft", "approved"].includes(item.status))
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+    const userAttendance = attendance.filter((item) => item.userId.toString() === user.id);
+    const officeAttendanceCount = userAttendance.filter((item) => item.locationStatus === "verified").length;
 
     return {
       ...publicUser(user),
-      attendanceCount: attendance.filter((item) => item.userId.toString() === user.id).length,
+      attendanceCount: userAttendance.length,
+      officeAttendanceCount,
       reportsCount: userReports.length,
       averageScore: scores.length ? Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length) : 0,
       activeToday: attendance.some((item) => item.userId.toString() === user.id && item.date === todayIso()),
@@ -135,7 +142,7 @@ export async function buildInternAiProfile(userId: string) {
 
   if (!user || user.role !== "intern") return null;
 
-  const plan = user.category ? await PlanModel.findOne({ category: user.category }) : null;
+  const plan = user.category ? await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 }) : null;
   const scores = reports.map((report) => report.aiReview?.productivityScore || 0);
   const averageScore = scores.length ? Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length) : 0;
   const blockerReports = reports.filter((report) => report.blockers.trim().length > 0);
@@ -152,6 +159,12 @@ export async function buildInternAiProfile(userId: string) {
       aiReviewedReports: aiReviewedReports.length,
       averageScore,
       attendanceCount: attendance.length,
+      officeAttendanceCount: attendance.filter((item) => item.locationStatus === "verified").length,
+      currentWeekOfficeDays: new Set(
+        attendance
+          .filter((item) => item.locationStatus === "verified" && item.date >= todayIso().slice(0, 8) + "01")
+          .map((item) => item.date)
+      ).size,
       blockerReports: blockerReports.length,
       lastReportAt: reports[0]?.createdAt?.toISOString()
     }
@@ -254,7 +267,7 @@ export async function buildPlanFitAssistant(input: {
     input.planId && input.requester.role === "admin"
       ? await PlanModel.findById(input.planId)
       : input.requester.category
-        ? await PlanModel.findOne({ category: input.requester.category })
+        ? await PlanModel.findOne({ category: input.requester.category, ...activePlanFilter }).sort({ createdAt: -1 })
         : null;
 
   if (!plan) {
@@ -378,7 +391,9 @@ ${context || "Кандидатов нет"}
 export async function buildDecisionCenter(category?: Category): Promise<DecisionCenter> {
   const dashboard = await buildDashboard(category);
   const aiSummary = await buildAiSummary(category);
-  const plan = category ? await PlanModel.findOne({ category }) : await PlanModel.findOne().sort({ updatedAt: -1 });
+  const plan = category
+    ? await PlanModel.findOne({ category, ...activePlanFilter }).sort({ createdAt: -1 })
+    : await PlanModel.findOne(activePlanFilter).sort({ updatedAt: -1 });
   const planFit = plan
     ? await buildPlanFitAssistant({
         requester: { role: "admin", category: undefined } as UserDocument,

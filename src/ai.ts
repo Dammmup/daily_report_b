@@ -1,6 +1,7 @@
 import type { AiReview, DailyReport, ProjectPlanStep, StrengthProfile, Survey } from "./types.js";
 
 const groqModel = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
+const groqWhisperModel = process.env.GROQ_WHISPER_MODEL || "whisper-large-v3-turbo";
 
 function extractJson(text: string) {
   const start = text.indexOf("{");
@@ -63,6 +64,32 @@ export async function askGroqAssistant(prompt: string) {
   if (!response.ok) return undefined;
   const data = (await response.json()) as { choices?: { message?: { content?: string } }[] };
   return data.choices?.[0]?.message?.content;
+}
+
+export async function transcribeAudio(input: { buffer: ArrayBuffer; filename: string; mimeType?: string }) {
+  if (!process.env.GROQ_API_KEY) return undefined;
+
+  const form = new FormData();
+  form.append("model", groqWhisperModel);
+  form.append("language", "ru");
+  form.append("response_format", "json");
+  form.append("file", new Blob([input.buffer], { type: input.mimeType || "audio/ogg" }), input.filename);
+
+  const response = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.GROQ_API_KEY}`
+    },
+    body: form
+  });
+
+  if (!response.ok) {
+    console.error("Groq transcription failed:", response.status, await response.text().catch(() => ""));
+    return undefined;
+  }
+
+  const data = (await response.json()) as { text?: string };
+  return data.text?.trim();
 }
 
 function addIsoDays(date: string, days: number) {

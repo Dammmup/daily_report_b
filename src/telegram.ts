@@ -1,6 +1,6 @@
 import { Markup, Telegraf, type Context } from "telegraf";
 import { hashPassword } from "./auth.js";
-import { askGroqAssistant } from "./ai.js";
+import { askGroqAssistant, transcribeAudio } from "./ai.js";
 import { categories, randomAvatarColor } from "./constants.js";
 import { PlanChangeModel, PlanModel, TelegramActivityModel, TelegramDraftModel, TelegramGroupModel, UserModel } from "./models.js";
 import { createDailyReport, formatLeadSummary } from "./services.js";
@@ -11,6 +11,7 @@ type DigestContent = "productivity" | "reports" | "full";
 let botInstance: Telegraf | undefined;
 let digestTimer: NodeJS.Timeout | undefined;
 const temporaryGroupMessageTtlMs = Number(process.env.TELEGRAM_TEMP_MESSAGE_TTL_MS || 5000);
+const activePlanFilter = { status: { $in: ["draft", "approved"] as const } } as any;
 
 const tileKeyboard = Markup.keyboard([
   ["План", "Дэйлик"],
@@ -145,13 +146,22 @@ function digestContentLabel(content?: string) {
   return "полная сводка";
 }
 
+type PlanStepStatus = "todo" | "in_progress" | "done" | "canceled";
+
+function stepStatusLabel(status: string) {
+  if (status === "done") return "готово";
+  if (status === "in_progress") return "в работе";
+  if (status === "canceled") return "отменено";
+  return "ожидает";
+}
+
 function formatPlanForTelegram(plan: Awaited<ReturnType<typeof PlanModel.findOne>>, chatUserId?: string) {
   if (!plan) return "План для вашего департамента еще не создан тимлидом.";
   const steps = (plan.steps || [])
     .slice(0, 10)
     .map((step, index) => {
       const assigned = step.assignedTo?.toString() === chatUserId ? " | назначено вам" : step.assignedTo ? " | назначено" : "";
-      const status = step.status === "done" ? "готово" : step.status === "in_progress" ? "в работе" : "ожидает";
+      const status = stepStatusLabel(step.status);
       return `${index + 1}. ${step.title} - до ${step.deadline} | ${status}${assigned}`;
     })
     .join("\n");
@@ -229,11 +239,12 @@ function planKeyboard() {
 
 function taskKeyboard(stepId: string, status: string) {
   const statusRow =
-    status === "done"
+    status === "done" || status === "canceled"
       ? [Markup.button.callback("Вернуть в работу", `task:status:${stepId}:in_progress`)]
       : [
           Markup.button.callback("В работу", `task:status:${stepId}:in_progress`),
-          Markup.button.callback("Готово", `task:status:${stepId}:done`)
+          Markup.button.callback("Готово", `task:status:${stepId}:done`),
+          Markup.button.callback("Отменить", `task:status:${stepId}:canceled`)
         ];
   return Markup.inlineKeyboard([statusRow, [Markup.button.callback("Есть блокер", `task:blocker:${stepId}`)]]);
 }
@@ -252,6 +263,10 @@ function getTextFromMessage(ctx: Context) {
   const message = ctx.message;
   if (!message || !("text" in message)) return "";
   return message.text.trim();
+}
+
+function isPrivateChat(ctx: Context) {
+  return ctx.chat?.type === "private";
 }
 
 function buildTelegramName(from: NonNullable<Context["from"]>) {
@@ -287,11 +302,10 @@ ${messages.join("\n")}
   return answer ? { ...fallback, summary: answer.slice(0, 700) } : fallback;
 }
 
-async function trackGroupMessage(ctx: Context) {
+async function trackGroupText(ctx: Context, text: string) {
   if (ctx.chat?.type !== "group" && ctx.chat?.type !== "supergroup") return;
   if (!ctx.from || ctx.from.is_bot) return;
 
-  const text = getTextFromMessage(ctx);
   if (!text || text.startsWith("/")) return;
 
   const title = "title" in ctx.chat ? ctx.chat.title : "";
@@ -367,6 +381,10 @@ async function trackGroupMessage(ctx: Context) {
       Markup.inlineKeyboard([[Markup.button.url("Открыть бота", `https://t.me/${ctx.botInfo?.username || ""}`)]])
     );
   }
+}
+
+async function trackGroupMessage(ctx: Context) {
+  await trackGroupText(ctx, getTextFromMessage(ctx));
 }
 
 async function trackNewGroupMembers(ctx: Context) {
@@ -510,7 +528,7 @@ async function sendGroupStatus(ctx: Context) {
   }
 
   const members = await UserModel.countDocuments({ telegramGroupChatId: String(ctx.chat.id), role: "intern" });
-  const plan = await PlanModel.findOne({ category: group.category });
+  const plan = await PlanModel.findOne({ category: group.category, ...activePlanFilter }).sort({ createdAt: -1 });
   await replyTemporary(ctx,
     [
       `Департамент: ${categories[group.category as Category]}`,
@@ -576,7 +594,7 @@ async function sendGroupStatusWithButtons(ctx: Context) {
   }
 
   const members = await UserModel.countDocuments({ telegramGroupChatId: String(ctx.chat.id), role: "intern" });
-  const plan = await PlanModel.findOne({ category: group.category });
+  const plan = await PlanModel.findOne({ category: group.category, ...activePlanFilter }).sort({ createdAt: -1 });
   await replyTemporary(ctx,
     [
       `Департамент: ${categories[group.category as Category]}`,
@@ -591,10 +609,10 @@ async function sendGroupStatusWithButtons(ctx: Context) {
 
 async function buildMotivationMessage(category: Category) {
   const [plan, interns] = await Promise.all([
-    PlanModel.findOne({ category }),
+    PlanModel.findOne({ category, ...activePlanFilter }).sort({ createdAt: -1 }),
     UserModel.find({ role: "intern", category }).sort({ telegramActivityScore: -1 }).limit(5)
   ]);
-  const openSteps = (plan?.steps || []).filter((step) => step.status !== "done").slice(0, 4);
+  const openSteps = (plan?.steps || []).filter((step) => step.status !== "done" && step.status !== "canceled").slice(0, 4);
   const activeNames = interns.filter((user) => (user.telegramActivityMessages || 0) > 0).map((user) => user.name).slice(0, 4);
 
   const fallback = [
@@ -711,6 +729,89 @@ async function requireLinkedUser(ctx: Context) {
   return user;
 }
 
+async function transcribeTelegramVoice(ctx: Context) {
+  const message = ctx.message;
+  if (!message || !("voice" in message)) return undefined;
+
+  const fileLink = await ctx.telegram.getFileLink(message.voice.file_id);
+  const response = await fetch(fileLink);
+  if (!response.ok) return undefined;
+
+  return transcribeAudio({
+    buffer: await response.arrayBuffer(),
+    filename: "telegram-voice.oga",
+    mimeType: message.voice.mime_type || "audio/ogg"
+  });
+}
+
+function looksLikeTaskQuestion(text: string) {
+  return /(мо(и|я)|мне|назнач|задач|шаг|делать|работать)/i.test(text) && /(шаг|задач|назнач|план)/i.test(text);
+}
+
+function looksLikePlanQuestion(text: string) {
+  return /(план|дедлайн|этап|проект|изменени)/i.test(text);
+}
+
+async function answerPrivateVoiceQuestion(ctx: Context, text: string) {
+  const user = await requireLinkedUser(ctx);
+  if (!user) return;
+
+  if (looksLikeTaskQuestion(text)) {
+    await sendMyTasks(ctx);
+    return;
+  }
+
+  if (looksLikePlanQuestion(text)) {
+    await sendPlan(ctx);
+    return;
+  }
+
+  const plan = user.category ? await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 }) : null;
+  const assignedSteps = (plan?.steps || []).filter((step) => step.assignedTo?.toString() === user.id);
+  const allSteps = (plan?.steps || []).slice(0, 10);
+  const context = [
+    `Пользователь: ${user.name}`,
+    `Роль: ${user.role}`,
+    `Департамент: ${user.category ? categories[user.category as Category] : "не выбран"}`,
+    plan ? `Активный план: ${plan.title}, дедлайн ${plan.adjustedDeadline}` : "Активного плана нет",
+    assignedSteps.length
+      ? `Назначенные шаги:\n${assignedSteps.map((step, index) => `${index + 1}. ${step.title}; дедлайн ${step.deadline}; статус ${stepStatusLabel(step.status)}`).join("\n")}`
+      : "Назначенных лично шагов нет",
+    allSteps.length ? `Все шаги плана:\n${allSteps.map((step, index) => `${index + 1}. ${step.title}; ${stepStatusLabel(step.status)}`).join("\n")}` : ""
+  ].join("\n");
+
+  const answer = await askGroqAssistant(`
+Пользователь задал голосовой вопрос Telegram-боту mini ERP.
+Вопрос после распознавания: ${text}
+
+Контекст из базы:
+${context}
+
+Ответь кратко по-русски. Если пользователь спрашивает про данные, которых нет в контексте, прямо скажи, что данных нет.
+`);
+
+  await ctx.reply(answer || "Я распознал голос, но не понял точный запрос. Можно спросить: какие шаги мне назначены, какой план департамента или какой дедлайн?");
+}
+
+async function handleVoiceMessage(ctx: Context) {
+  const transcript = await transcribeTelegramVoice(ctx);
+  if (!transcript) {
+    await ctx.reply("Не смог распознать голосовое. Проверьте GROQ_API_KEY и GROQ_WHISPER_MODEL.");
+    return;
+  }
+
+  if (isGroupChat(ctx)) {
+    await trackGroupText(ctx, transcript);
+    await replyTemporary(ctx, `Голосовое распознано и учтено в активности: ${transcript.slice(0, 180)}`, undefined, 7000);
+    return;
+  }
+
+  if (isPrivateChat(ctx)) {
+    await ctx.reply(`Распознал: ${transcript}`);
+    await answerPrivateVoiceQuestion(ctx, transcript);
+  }
+}
+
 async function sendMyTasks(ctx: Context) {
   const user = await requireLinkedUser(ctx);
   if (!user) return;
@@ -719,7 +820,7 @@ async function sendMyTasks(ctx: Context) {
     return;
   }
 
-  const plan = await PlanModel.findOne({ category: user.category });
+  const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
   if (!plan) {
     await ctx.reply("План департамента еще не создан.", mainMenuKeyboard(user.role));
     return;
@@ -733,7 +834,7 @@ async function sendMyTasks(ctx: Context) {
 
   await ctx.reply(`Ваши задачи по плану "${plan.title}":`);
   for (const step of assignedSteps.slice(0, 8)) {
-    const status = step.status === "done" ? "готово" : step.status === "in_progress" ? "в работе" : "ожидает";
+    const status = stepStatusLabel(step.status);
     await ctx.reply(
       [`${step.title}`, step.description ? `Описание: ${step.description}` : "", `Дедлайн: ${step.deadline}`, `Статус: ${status}`].filter(Boolean).join("\n"),
       taskKeyboard(step._id.toString(), step.status)
@@ -749,24 +850,24 @@ async function sendAllPlanSteps(ctx: Context) {
     return;
   }
 
-  const plan = await PlanModel.findOne({ category: user.category });
+  const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
   if (!plan) {
     await ctx.reply("План департамента еще не создан.", mainMenuKeyboard(user.role));
     return;
   }
 
   const lines = (plan.steps || []).slice(0, 12).map((step, index) => {
-    const status = step.status === "done" ? "готово" : step.status === "in_progress" ? "в работе" : "ожидает";
+    const status = stepStatusLabel(step.status);
     const mine = step.assignedTo?.toString() === user.id ? " | ваше" : "";
     return `${index + 1}. ${step.title} - до ${step.deadline} | ${status}${mine}`;
   });
   await ctx.reply(lines.length ? lines.join("\n") : "В плане пока нет шагов.", planKeyboard());
 }
 
-async function updateTaskStatus(ctx: Context, stepId: string, status: "todo" | "in_progress" | "done") {
+async function updateTaskStatus(ctx: Context, stepId: string, status: PlanStepStatus) {
   const user = await requireLinkedUser(ctx);
   if (!user?.category) return;
-  const plan = await PlanModel.findOne({ category: user.category });
+  const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
   const step = plan?.steps.id(stepId);
   if (!plan || !step || step.assignedTo?.toString() !== user.id) {
     await ctx.reply("Эта задача не найдена среди назначенных вам шагов.");
@@ -774,7 +875,7 @@ async function updateTaskStatus(ctx: Context, stepId: string, status: "todo" | "
   }
   step.status = status;
   await plan.save();
-  await ctx.reply(`Статус обновлен: ${step.title}`, taskKeyboard(step._id.toString(), step.status));
+  await ctx.reply(`Статус обновлен: ${step.title} — ${stepStatusLabel(step.status)}`, taskKeyboard(step._id.toString(), step.status));
 }
 
 async function startDailyWizard(ctx: Context) {
@@ -959,7 +1060,7 @@ async function sendPlan(ctx: Context) {
     return;
   }
 
-  const plan = await PlanModel.findOne({ category: user.category });
+  const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
   await ctx.reply(
     formatPlanForTelegram(plan, user.id),
     Markup.inlineKeyboard([[Markup.button.callback("Как написать дэйлик", "report:help"), Markup.button.callback("Обновить", "plan:view")]])
@@ -1069,6 +1170,8 @@ export function getTelegramBot() {
   bot.command("motivation_on", (ctx) => setGroupMotivation(ctx, true));
   bot.command("motivation_off", (ctx) => setGroupMotivation(ctx, false));
 
+  bot.on("voice", (ctx) => handleVoiceMessage(ctx));
+
   bot.on("message", async (ctx, next) => {
     if (await handleDraftMessage(ctx)) return;
     await trackNewGroupMembers(ctx);
@@ -1162,9 +1265,9 @@ export function getTelegramBot() {
     await ctx.answerCbQuery();
     await startBlockerWizard(ctx);
   });
-  bot.action(/^task:status:([a-f0-9]{24}):(todo|in_progress|done)$/, async (ctx) => {
+  bot.action(/^task:status:([a-f0-9]{24}):(todo|in_progress|done|canceled)$/, async (ctx) => {
     await ctx.answerCbQuery("Обновляю статус");
-    await updateTaskStatus(ctx, ctx.match[1], ctx.match[2] as "todo" | "in_progress" | "done");
+    await updateTaskStatus(ctx, ctx.match[1], ctx.match[2] as PlanStepStatus);
   });
   bot.action(/^task:blocker:([a-f0-9]{24})$/, async (ctx) => {
     await ctx.answerCbQuery();

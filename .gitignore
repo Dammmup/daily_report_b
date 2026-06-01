@@ -3,6 +3,7 @@ dist
 backend/dist
 frontend/dist
 .env
+.env.example
 server/data/db.json
 *.log
 verification-*.png

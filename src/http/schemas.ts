@@ -30,7 +30,17 @@ export const loginSchema = z.object({
 });
 
 export const attendanceSchema = z.object({
-  mood: z.enum(["focused", "normal", "blocked"])
+  mood: z.enum(["focused", "normal", "blocked"]),
+  latitude: z.number().min(-90).max(90).optional(),
+  longitude: z.number().min(-180).max(180).optional()
+});
+
+export const officeLocationSchema = z.object({
+  category: categorySchema.optional(),
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  radiusMeters: z.number().min(25).max(2000).default(150),
+  minWeeklyOfficeDays: z.number().int().min(1).max(7).default(2)
 });
 
 export const reportSchema = z.object({
@@ -65,7 +75,7 @@ export const planStepUpdateSchema = z.object({
   description: z.string().optional(),
   deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   assignedTo: z.string().optional().nullable(),
-  status: z.enum(["todo", "in_progress", "done"]).optional()
+  status: z.enum(["todo", "in_progress", "done", "canceled"]).optional()
 });
 
 export const departmentSchema = z.object({

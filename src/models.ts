@@ -1,4 +1,5 @@
 export * from "./models/attendance.model.js";
+export * from "./models/office-location.model.js";
 export * from "./models/plan-change.model.js";
 export * from "./models/plan.model.js";
 export * from "./models/report.model.js";

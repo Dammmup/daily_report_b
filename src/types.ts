@@ -96,7 +96,8 @@ export type ProjectPlan = {
   leadId: string;
   title: string;
   category: Category;
-  status: "draft" | "approved";
+  version: number;
+  status: "draft" | "approved" | "completed" | "archived";
   startDate: string;
   baseDeadline: string;
   adjustedDeadline: string;
@@ -111,7 +112,7 @@ export type ProjectPlanStep = {
   title: string;
   description: string;
   deadline: string;
-  status: "todo" | "in_progress" | "done";
+  status: "todo" | "in_progress" | "done" | "canceled";
   assignedTo?: string;
   source: "ai" | "manual";
 };

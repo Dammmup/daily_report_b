@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
 import { hashPassword } from "./auth.js";
-import { UserModel } from "./models.js";
+import { PlanModel, UserModel } from "./models.js";
 
 let connectPromise: Promise<typeof mongoose> | undefined;
 let bootstrapPromise: Promise<void> | undefined;
@@ -15,8 +15,22 @@ export async function connectMongo() {
   connectPromise ||= mongoose.connect(mongoUri);
   await connectPromise;
 
-  bootstrapPromise ||= seedAdmin();
+  bootstrapPromise ||= bootstrapDatabase();
   await bootstrapPromise;
+}
+
+async function bootstrapDatabase() {
+  await dropLegacyPlanCategoryUniqueIndex();
+  await seedAdmin();
+}
+
+async function dropLegacyPlanCategoryUniqueIndex() {
+  try {
+    await PlanModel.collection.dropIndex("category_1");
+    console.log("MongoDB migrated: dropped legacy unique plan category index.");
+  } catch {
+    // The index may not exist on fresh databases.
+  }
 }
 
 async function seedAdmin() {

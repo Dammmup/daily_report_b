@@ -56,7 +56,8 @@ authRouter.post("/request-code", async (req, res) => {
   let delivery = { delivered: false, devCode: code };
   if (email) {
     delivery = await sendVerificationEmail(email, code);
-    if (!delivery.delivered) {
+    const allowDevCode = process.env.ALLOW_DEV_VERIFICATION_CODE === "true" || process.env.NODE_ENV !== "production";
+    if (!delivery.delivered && !allowDevCode) {
       res.status(500).json({ message: "Не удалось отправить код подтверждения на почту." });
       return;
     }

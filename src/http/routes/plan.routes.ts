@@ -10,6 +10,11 @@ import { planSchema, planStepCreateSchema, planStepUpdateSchema } from "../schem
 import { serializePlan } from "../serializers.js";
 
 export const planRouter = Router();
+const activePlanStatuses = ["draft", "approved"] as const;
+
+function activePlanQuery(category: Category | string) {
+  return { category, status: { $in: activePlanStatuses } } as any;
+}
 
 planRouter.get("/my-plan", auth, async (req: AuthedRequest, res) => {
   if (!req.user!.category) {
@@ -17,8 +22,17 @@ planRouter.get("/my-plan", auth, async (req: AuthedRequest, res) => {
     return;
   }
 
-  const plan = await PlanModel.findOne({ category: req.user!.category });
+  const plan = await PlanModel.findOne(activePlanQuery(req.user!.category)).sort({ createdAt: -1 });
   res.json(serializePlan(plan));
+});
+
+planRouter.get("/department-plans", auth, async (req: AuthedRequest, res) => {
+  if (!req.user!.category) {
+    res.json([]);
+    return;
+  }
+  const plans = await PlanModel.find({ category: req.user!.category }).sort({ createdAt: -1 });
+  res.json(plans.map(serializePlan));
 });
 
 planRouter.post("/department-plan", auth, requireRole("lead"), async (req: AuthedRequest, res) => {
@@ -34,7 +48,7 @@ planRouter.post("/department-plan", auth, requireRole("lead"), async (req: Authe
   }
 
   const category = req.user!.category as Category;
-  const existing = await PlanModel.findOne({ category });
+  const existing = await PlanModel.findOne(activePlanQuery(category)).sort({ createdAt: -1 });
   const startDate = existing?.startDate || todayIso();
   const steps = await decomposeProjectPlan({
     title: body.data.title,
@@ -44,13 +58,12 @@ planRouter.post("/department-plan", auth, requireRole("lead"), async (req: Authe
     categoryLabel: categories[category]
   });
 
-  const plan = await PlanModel.findOneAndUpdate(
-    { category },
-    {
+  const payload = {
       leadId: req.user!._id,
       title: body.data.title,
       category,
-      status: "approved",
+      version: existing?.version || (await PlanModel.countDocuments({ category })) + 1,
+      status: "approved" as const,
       startDate,
       baseDeadline: body.data.baseDeadline,
       adjustedDeadline: existing?.adjustedDeadline || body.data.baseDeadline,
@@ -58,9 +71,16 @@ planRouter.post("/department-plan", auth, requireRole("lead"), async (req: Authe
       steps,
       issues: existing?.issues || [],
       aiRationale: "AI разложил утвержденный план на шаги. Блокеры из дэйликов стажеров могут продлить дедлайн."
-    },
-    { new: true, upsert: true }
-  );
+    };
+
+  const plan = existing
+    ? await PlanModel.findByIdAndUpdate(existing._id, payload, { new: true })
+    : await PlanModel.create(payload);
+
+  if (!plan) {
+    res.status(500).json({ message: "Не удалось сохранить план" });
+    return;
+  }
 
   await notifyDepartmentPlanChange({
     planId: plan.id,
@@ -74,6 +94,29 @@ planRouter.post("/department-plan", auth, requireRole("lead"), async (req: Authe
   res.status(201).json(serializePlan(plan));
 });
 
+planRouter.post("/department-plan/:planId/complete", auth, requireRole("lead"), async (req: AuthedRequest, res) => {
+  const plan = req.user!.category ? await PlanModel.findOne({ _id: req.params.planId, category: req.user!.category }) : null;
+  if (!plan) {
+    res.status(404).json({ message: "План не найден" });
+    return;
+  }
+
+  plan.status = "completed";
+  plan.completedAt = new Date();
+  await plan.save();
+
+  await notifyDepartmentPlanChange({
+    planId: plan.id,
+    category: plan.category as Category,
+    actorId: req.user!.id,
+    type: "plan_updated",
+    title: "План завершен",
+    summary: `Тимлид завершил план "${plan.title}". Новый план департамента можно создать отдельно.`
+  });
+
+  res.json(serializePlan(plan));
+});
+
 planRouter.post("/department-plan/steps", auth, requireRole("lead"), async (req: AuthedRequest, res) => {
   const body = planStepCreateSchema.safeParse(req.body);
   if (!body.success) {
@@ -81,7 +124,7 @@ planRouter.post("/department-plan/steps", auth, requireRole("lead"), async (req:
     return;
   }
 
-  const plan = req.user!.category ? await PlanModel.findOne({ category: req.user!.category }) : null;
+  const plan = req.user!.category ? await PlanModel.findOne(activePlanQuery(req.user!.category)).sort({ createdAt: -1 }) : null;
   if (!plan) {
     res.status(404).json({ message: "Сначала создайте план департамента" });
     return;
@@ -124,7 +167,7 @@ planRouter.patch("/department-plan/steps/:stepId", auth, requireRole("lead"), as
     return;
   }
 
-  const plan = req.user!.category ? await PlanModel.findOne({ category: req.user!.category }) : null;
+  const plan = req.user!.category ? await PlanModel.findOne(activePlanQuery(req.user!.category)).sort({ createdAt: -1 }) : null;
   const step = plan?.steps.id(String(req.params.stepId));
   if (!plan || !step) {
     res.status(404).json({ message: "Шаг плана не найден" });
