@@ -3,6 +3,7 @@ import { Types } from "mongoose";
 import { decomposeProjectPlan } from "../../ai.js";
 import { categories, todayIso } from "../../constants.js";
 import { PlanModel, UserModel } from "../../models.js";
+import { notifyDepartmentPlanChange } from "../../telegram.js";
 import type { Category } from "../../types.js";
 import { auth, requireRole, type AuthedRequest } from "../middleware/auth.js";
 import { planSchema, planStepCreateSchema, planStepUpdateSchema } from "../schemas.js";
@@ -61,6 +62,15 @@ planRouter.post("/department-plan", auth, requireRole("lead"), async (req: Authe
     { new: true, upsert: true }
   );
 
+  await notifyDepartmentPlanChange({
+    planId: plan.id,
+    category,
+    actorId: req.user!.id,
+    type: existing ? "plan_updated" : "plan_created",
+    title: existing ? "План обновлен" : "План создан",
+    summary: `Тимлид обновил план "${plan.title}". Текущий дедлайн: ${plan.adjustedDeadline}. Шагов в плане: ${plan.steps.length}.`
+  });
+
   res.status(201).json(serializePlan(plan));
 });
 
@@ -94,6 +104,16 @@ planRouter.post("/department-plan/steps", auth, requireRole("lead"), async (req:
     source: "manual"
   });
   await plan.save();
+  const addedStep = plan.steps[plan.steps.length - 1];
+  await notifyDepartmentPlanChange({
+    planId: plan.id,
+    category: plan.category as Category,
+    actorId: req.user!.id,
+    type: body.data.assignedTo ? "step_assigned" : "step_added",
+    title: body.data.assignedTo ? "Назначен новый шаг" : "Добавлен новый шаг",
+    summary: `Шаг: ${addedStep.title}. Дедлайн: ${addedStep.deadline}.${body.data.assignedTo ? " Шаг назначен стажеру." : ""}`,
+    stepId: addedStep._id.toString()
+  });
   res.status(201).json(serializePlan(plan));
 });
 
@@ -110,6 +130,13 @@ planRouter.patch("/department-plan/steps/:stepId", auth, requireRole("lead"), as
     res.status(404).json({ message: "Шаг плана не найден" });
     return;
   }
+
+  const before = {
+    title: step.title,
+    deadline: step.deadline,
+    assignedTo: step.assignedTo?.toString(),
+    status: step.status
+  };
 
   if (body.data.assignedTo) {
     const assignee = await UserModel.findOne({ _id: body.data.assignedTo, role: "intern", category: req.user!.category });
@@ -128,5 +155,21 @@ planRouter.patch("/department-plan/steps/:stepId", auth, requireRole("lead"), as
   }
 
   await plan.save();
+  const changes = [
+    before.title !== step.title ? `название: "${before.title}" -> "${step.title}"` : "",
+    before.deadline !== step.deadline ? `дедлайн: ${before.deadline} -> ${step.deadline}` : "",
+    before.assignedTo !== step.assignedTo?.toString() ? "назначение изменено" : "",
+    before.status !== step.status ? `статус: ${before.status} -> ${step.status}` : ""
+  ].filter(Boolean);
+
+  await notifyDepartmentPlanChange({
+    planId: plan.id,
+    category: plan.category as Category,
+    actorId: req.user!.id,
+    type: before.deadline !== step.deadline ? "deadline_changed" : before.assignedTo !== step.assignedTo?.toString() ? "step_assigned" : "step_updated",
+    title: before.deadline !== step.deadline ? "Изменен дедлайн шага" : "Изменен шаг плана",
+    summary: `Шаг: ${step.title}. ${changes.join("; ") || "Обновлены параметры шага."}`,
+    stepId: step._id.toString()
+  });
   res.json(serializePlan(plan));
 });

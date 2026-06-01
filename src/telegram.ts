@@ -2,7 +2,7 @@ import { Markup, Telegraf, type Context } from "telegraf";
 import { hashPassword } from "./auth.js";
 import { askGroqAssistant } from "./ai.js";
 import { categories, randomAvatarColor } from "./constants.js";
-import { PlanModel, TelegramActivityModel, TelegramDraftModel, TelegramGroupModel, UserModel } from "./models.js";
+import { PlanChangeModel, PlanModel, TelegramActivityModel, TelegramDraftModel, TelegramGroupModel, UserModel } from "./models.js";
 import { createDailyReport, formatLeadSummary } from "./services.js";
 import type { Category } from "./types.js";
 
@@ -10,6 +10,7 @@ type DigestContent = "productivity" | "reports" | "full";
 
 let botInstance: Telegraf | undefined;
 let digestTimer: NodeJS.Timeout | undefined;
+const temporaryGroupMessageTtlMs = Number(process.env.TELEGRAM_TEMP_MESSAGE_TTL_MS || 5000);
 
 const tileKeyboard = Markup.keyboard([
   ["План", "Дэйлик"],
@@ -65,6 +66,77 @@ function parseDigest(text: string) {
     time,
     content: (content || "full") as DigestContent
   };
+}
+
+function isGroupChat(ctx: Context) {
+  return ctx.chat?.type === "group" || ctx.chat?.type === "supergroup";
+}
+
+function isCallbackContext(ctx: Context) {
+  return Boolean("callbackQuery" in ctx.update && ctx.update.callbackQuery);
+}
+
+async function replyAccessDenied(ctx: Context, message: string) {
+  if (isCallbackContext(ctx)) {
+    await ctx.answerCbQuery(message, { show_alert: true });
+    return;
+  }
+  await ctx.reply(message);
+}
+
+async function requireGroupAdmin(ctx: Context) {
+  if (!isGroupChat(ctx)) {
+    await replyAccessDenied(ctx, "Эта настройка доступна только в группе департамента.");
+    return false;
+  }
+
+  if (!ctx.from) {
+    await replyAccessDenied(ctx, "Не удалось определить пользователя.");
+    return false;
+  }
+
+  const chat = ctx.chat;
+  if (!chat) {
+    await replyAccessDenied(ctx, "Не удалось определить группу.");
+    return false;
+  }
+
+  const member = await ctx.telegram.getChatMember(chat.id, ctx.from.id);
+  const allowed = member.status === "administrator" || member.status === "creator";
+  if (!allowed) {
+    await replyAccessDenied(ctx, "Эти кнопки доступны только администраторам группы.");
+  }
+
+  return allowed;
+}
+
+function scheduleMessageDelete(ctx: Context, messageId: number, delayMs = temporaryGroupMessageTtlMs) {
+  if (!isGroupChat(ctx)) return;
+
+  setTimeout(() => {
+    void ctx.telegram.deleteMessage(ctx.chat!.id, messageId).catch(() => undefined);
+  }, Math.max(0, delayMs));
+}
+
+async function replyTemporary(ctx: Context, text: string, extra?: Parameters<Context["reply"]>[1], delayMs = temporaryGroupMessageTtlMs) {
+  const sent = await ctx.reply(text, extra);
+  scheduleMessageDelete(ctx, sent.message_id, delayMs);
+  return sent;
+}
+
+function deleteCallbackSourceLater(ctx: Context, delayMs = temporaryGroupMessageTtlMs) {
+  if (!isGroupChat(ctx)) return;
+  const callbackQuery = "callbackQuery" in ctx.update ? (ctx.update.callbackQuery as { message?: { message_id?: number } }) : undefined;
+  const messageId = callbackQuery?.message?.message_id;
+  if (messageId) {
+    scheduleMessageDelete(ctx, messageId, delayMs);
+  }
+}
+
+function deleteIncomingMessageLater(ctx: Context, delayMs = temporaryGroupMessageTtlMs) {
+  if (!isGroupChat(ctx)) return;
+  const messageId = ctx.message?.message_id;
+  if (messageId) scheduleMessageDelete(ctx, messageId, delayMs);
 }
 
 function digestContentLabel(content?: string) {
@@ -127,6 +199,8 @@ function groupActionsKeyboard(enabled?: boolean) {
 }
 
 async function askGroupDepartment(ctx: Context) {
+  if (!(await requireGroupAdmin(ctx))) return;
+
   await ctx.reply("Выберите департамент для этой группы:", groupDepartmentKeyboard());
 }
 
@@ -184,6 +258,10 @@ function buildTelegramName(from: NonNullable<Context["from"]>) {
   return [from.first_name, from.last_name].filter(Boolean).join(" ") || from.username || `Telegram ${from.id}`;
 }
 
+function buildTelegramMemberName(member: { id: number; first_name: string; last_name?: string; username?: string }) {
+  return [member.first_name, member.last_name].filter(Boolean).join(" ") || member.username || `Telegram ${member.id}`;
+}
+
 function localActivitySummary(messages: string[]) {
   const text = messages.join(" ").toLowerCase();
   const hasProgress = /(сделал|готов|закрыл|исправил|реализовал|проверил|добавил|собрал|done|fixed|ready)/i.test(text);
@@ -217,7 +295,8 @@ async function trackGroupMessage(ctx: Context) {
   if (!text || text.startsWith("/")) return;
 
   const title = "title" in ctx.chat ? ctx.chat.title : "";
-  const category = detectCategoryFromGroupTitle(title);
+  const existingGroup = await TelegramGroupModel.findOne({ chatId: String(ctx.chat.id) });
+  const category = (existingGroup?.category as Category | undefined) || detectCategoryFromGroupTitle(title);
   if (!category) return;
 
   const now = new Date();
@@ -258,7 +337,7 @@ async function trackGroupMessage(ctx: Context) {
     user.name = user.name || buildTelegramName(ctx.from);
     user.telegramUserId = user.telegramUserId || telegramUserId;
     if (username) user.telegramUsername = username;
-    user.telegramGroupChatId = chatId;
+    if (!user.telegramGroupChatId || user.category === category) user.telegramGroupChatId = chatId;
     user.category = user.category || category;
   }
 
@@ -290,9 +369,82 @@ async function trackGroupMessage(ctx: Context) {
   }
 }
 
+async function trackNewGroupMembers(ctx: Context) {
+  if (ctx.chat?.type !== "group" && ctx.chat?.type !== "supergroup") return;
+  const message = ctx.message;
+  if (!message || !("new_chat_members" in message)) return;
+
+  const title = "title" in ctx.chat ? ctx.chat.title : "";
+  const chatId = String(ctx.chat.id);
+  const existingGroup = await TelegramGroupModel.findOne({ chatId });
+  const category = (existingGroup?.category as Category | undefined) || detectCategoryFromGroupTitle(title);
+
+  const group = await TelegramGroupModel.findOneAndUpdate(
+    { chatId },
+    {
+      chatId,
+      title,
+      ...(category ? { category } : {}),
+      lastActivityAt: new Date()
+    },
+    { upsert: true, new: true }
+  );
+
+  let created = 0;
+  for (const member of message.new_chat_members) {
+    if (member.is_bot) continue;
+
+    const telegramUserId = String(member.id);
+    const username = member.username?.toLowerCase();
+    let user = await UserModel.findOne({ telegramUserId });
+    if (!user && username) user = await UserModel.findOne({ telegramUsername: username });
+    if (!user) {
+      user = await UserModel.create({
+        name: buildTelegramMemberName(member),
+        role: "intern",
+        category,
+        avatarColor: randomAvatarColor(),
+        firstLoginCompleted: false,
+        emailVerified: false,
+        telegramUserId,
+        telegramUsername: username,
+        telegramGroupChatId: category ? chatId : undefined,
+        registrationSource: "telegram_group",
+        passwordHash: hashPassword(`telegram-${telegramUserId}-${Date.now()}`)
+      });
+      created += 1;
+    } else {
+      user.telegramUserId = user.telegramUserId || telegramUserId;
+      if (username) user.telegramUsername = username;
+      if (!user.category && category) user.category = category;
+      if (!user.telegramGroupChatId && category) user.telegramGroupChatId = chatId;
+      await user.save();
+    }
+  }
+
+  if (created > 0) {
+    group.membersSeen += created;
+    await group.save();
+  }
+
+  if (!category) {
+    await ctx.reply("Вижу новых участников, но группа еще не привязана к департаменту.", groupDepartmentKeyboard());
+    return;
+  }
+
+  await ctx.reply(
+    `Добавил новых участников в предварительный список департамента: ${categories[category]}. Чтобы завершить регистрацию, им нужно открыть личку с ботом и нажать /start.`,
+    Markup.inlineKeyboard([[Markup.button.url("Открыть бота", `https://t.me/${ctx.botInfo?.username || ""}`)]])
+  );
+}
+
 async function applyGroupDepartment(ctx: Context, category: Category) {
+  if (!(await requireGroupAdmin(ctx))) return;
+  deleteIncomingMessageLater(ctx);
+  deleteCallbackSourceLater(ctx);
+
   if (ctx.chat?.type !== "group" && ctx.chat?.type !== "supergroup") {
-    await ctx.reply("Эта команда работает только в группе департамента.");
+    await replyTemporary(ctx, "Эта команда работает только в группе департамента.");
     return;
   }
 
@@ -308,19 +460,22 @@ async function applyGroupDepartment(ctx: Context, category: Category) {
     { upsert: true, new: true }
   );
 
-  await ctx.reply(`Группа привязана к департаменту: ${categories[category]}. Участников вижу: ${group.membersSeen}.`, groupActionsKeyboard(group.motivationEnabled));
+  await replyTemporary(ctx, `Группа привязана к департаменту: ${categories[category]}. Участников вижу: ${group.membersSeen}.`, groupActionsKeyboard(group.motivationEnabled));
 }
 
 async function setGroupDepartment(ctx: Context) {
+  if (!(await requireGroupAdmin(ctx))) return;
+  deleteIncomingMessageLater(ctx);
+
   if (ctx.chat?.type !== "group" && ctx.chat?.type !== "supergroup") {
-    await ctx.reply("Эта команда работает только в группе департамента.");
+    await replyTemporary(ctx, "Эта команда работает только в группе департамента.");
     return;
   }
 
   const text = getTextFromMessage(ctx);
   const category = parseCategoryAlias(text.split(/\s+/)[1]);
   if (!category) {
-    await ctx.reply(categoryHelp());
+    await replyTemporary(ctx, categoryHelp(), undefined, 15000);
     return;
   }
 
@@ -336,36 +491,45 @@ async function setGroupDepartment(ctx: Context) {
     { upsert: true, new: true }
   );
 
-  await ctx.reply(`Группа привязана к департаменту: ${categories[category]}. Участников вижу: ${group.membersSeen}.`);
+  await replyTemporary(ctx, `Группа привязана к департаменту: ${categories[category]}. Участников вижу: ${group.membersSeen}.`);
 }
 
 async function sendGroupStatus(ctx: Context) {
+  if (!(await requireGroupAdmin(ctx))) return;
+  deleteIncomingMessageLater(ctx);
+
   if (ctx.chat?.type !== "group" && ctx.chat?.type !== "supergroup") {
-    await ctx.reply("Эта команда работает только в группе департамента.");
+    await replyTemporary(ctx, "Эта команда работает только в группе департамента.");
     return;
   }
 
   const group = await TelegramGroupModel.findOne({ chatId: String(ctx.chat.id) });
   if (!group?.category) {
-    await ctx.reply(`Группа еще не привязана к департаменту.\n${categoryHelp()}`);
+    await replyTemporary(ctx, `Группа еще не привязана к департаменту.\n${categoryHelp()}`, undefined, 15000);
     return;
   }
 
   const members = await UserModel.countDocuments({ telegramGroupChatId: String(ctx.chat.id), role: "intern" });
   const plan = await PlanModel.findOne({ category: group.category });
-  await ctx.reply(
+  await replyTemporary(ctx,
     [
       `Департамент: ${categories[group.category as Category]}`,
       `Стажеров найдено по чату: ${members}`,
       `Мотивация: ${group.motivationEnabled ? "включена" : "выключена"}`,
       plan ? `План: ${plan.title}, дедлайн ${plan.adjustedDeadline}` : "План департамента еще не создан"
-    ].join("\n")
+    ].join("\n"),
+    undefined,
+    15000
   );
 }
 
 async function setGroupMotivation(ctx: Context, enabled: boolean) {
+  if (!(await requireGroupAdmin(ctx))) return;
+  deleteIncomingMessageLater(ctx);
+  deleteCallbackSourceLater(ctx);
+
   if (ctx.chat?.type !== "group" && ctx.chat?.type !== "supergroup") {
-    await ctx.reply("Эта команда работает только в группе департамента.");
+    await replyTemporary(ctx, "Эта команда работает только в группе департамента.");
     return;
   }
 
@@ -382,7 +546,7 @@ async function setGroupMotivation(ctx: Context, enabled: boolean) {
     { upsert: true, new: true }
   );
 
-  await ctx.reply(`Будничная мотивация ${group.motivationEnabled ? "включена" : "выключена"}.`);
+  await replyTemporary(ctx, `Будничная мотивация ${group.motivationEnabled ? "включена" : "выключена"}.`);
 }
 
 async function handleGroupDepartmentCommand(ctx: Context) {
@@ -396,27 +560,32 @@ async function handleGroupDepartmentCommand(ctx: Context) {
 }
 
 async function sendGroupStatusWithButtons(ctx: Context) {
+  if (!(await requireGroupAdmin(ctx))) return;
+  deleteIncomingMessageLater(ctx);
+  deleteCallbackSourceLater(ctx, 15000);
+
   if (ctx.chat?.type !== "group" && ctx.chat?.type !== "supergroup") {
-    await ctx.reply("Эта команда работает только в группе департамента.");
+    await replyTemporary(ctx, "Эта команда работает только в группе департамента.");
     return;
   }
 
   const group = await TelegramGroupModel.findOne({ chatId: String(ctx.chat.id) });
   if (!group?.category) {
-    await ctx.reply("Группа еще не привязана к департаменту.", groupDepartmentKeyboard());
+    await replyTemporary(ctx, "Группа еще не привязана к департаменту.", groupDepartmentKeyboard(), 15000);
     return;
   }
 
   const members = await UserModel.countDocuments({ telegramGroupChatId: String(ctx.chat.id), role: "intern" });
   const plan = await PlanModel.findOne({ category: group.category });
-  await ctx.reply(
+  await replyTemporary(ctx,
     [
       `Департамент: ${categories[group.category as Category]}`,
       `Стажеров найдено по чату: ${members}`,
       `Мотивация: ${group.motivationEnabled ? "включена" : "выключена"}`,
       plan ? `План: ${plan.title}, дедлайн ${plan.adjustedDeadline}` : "План департамента еще не создан"
     ].join("\n"),
-    groupActionsKeyboard(group.motivationEnabled)
+    groupActionsKeyboard(group.motivationEnabled),
+    15000
   );
 }
 
@@ -474,6 +643,58 @@ export async function sendWeekdayGroupMotivation() {
   }
 
   return { sent };
+}
+
+export async function notifyDepartmentPlanChange(input: {
+  planId: string;
+  category: Category;
+  actorId: string;
+  type: "plan_created" | "plan_updated" | "step_added" | "step_updated" | "step_assigned" | "deadline_changed";
+  title: string;
+  summary: string;
+  stepId?: string;
+}) {
+  const recipients = await UserModel.find({
+    role: "intern",
+    category: input.category,
+    telegramChatId: { $exists: true, $ne: "" }
+  });
+
+  const change = await PlanChangeModel.create({
+    planId: input.planId,
+    category: input.category,
+    actorId: input.actorId,
+    type: input.type,
+    title: input.title,
+    summary: input.summary,
+    stepId: input.stepId,
+    recipientsCount: recipients.length
+  });
+
+  const bot = getTelegramBot();
+  if (!bot || !recipients.length) return change;
+
+  const message = [
+    "Изменение в плане департамента",
+    `Департамент: ${categories[input.category]}`,
+    `Событие: ${input.title}`,
+    input.summary
+  ].join("\n");
+
+  const buttons = Markup.inlineKeyboard([
+    [Markup.button.callback("Посмотреть план", "plan:view"), Markup.button.callback("Мои задачи", "tasks:mine")],
+    [Markup.button.webApp("Открыть приложение", appUrl)]
+  ]);
+
+  for (const user of recipients) {
+    try {
+      await bot.telegram.sendMessage(user.telegramChatId!, message, buttons);
+    } catch (error) {
+      console.error("Telegram plan change notification error", error);
+    }
+  }
+
+  return change;
 }
 
 async function getLinkedUser(ctx: Context) {
@@ -850,6 +1071,7 @@ export function getTelegramBot() {
 
   bot.on("message", async (ctx, next) => {
     if (await handleDraftMessage(ctx)) return;
+    await trackNewGroupMembers(ctx);
     await trackGroupMessage(ctx);
     return next();
   });
@@ -888,24 +1110,29 @@ export function getTelegramBot() {
   });
 
   bot.action("group:department:choose", async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
     await ctx.answerCbQuery();
     await askGroupDepartment(ctx);
   });
   bot.action(/^group:department:(data|marketing|erp|security)$/, async (ctx) => {
     const category = parseCategoryAlias(ctx.match[1]);
+    if (!(await requireGroupAdmin(ctx))) return;
     await ctx.answerCbQuery(category ? "Департамент выбран" : "Неизвестный департамент");
     if (category) await applyGroupDepartment(ctx, category);
   });
   bot.action("group:status", async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
     await ctx.answerCbQuery();
     await sendGroupStatusWithButtons(ctx);
   });
   bot.action("group:motivation:on", async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
     await ctx.answerCbQuery("Мотивация включается");
     await setGroupMotivation(ctx, true);
     await sendGroupStatusWithButtons(ctx);
   });
   bot.action("group:motivation:off", async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
     await ctx.answerCbQuery("Мотивация отключается");
     await setGroupMotivation(ctx, false);
     await sendGroupStatusWithButtons(ctx);
