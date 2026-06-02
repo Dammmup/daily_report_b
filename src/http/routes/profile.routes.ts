@@ -11,6 +11,26 @@ profileRouter.get("/me", auth, (req: AuthedRequest, res) => {
   res.json({ user: publicUser(req.user!) });
 });
 
+
+
+profileRouter.post("/me/telegram-link", auth, async (req: AuthedRequest, res) => {
+  const user = req.user!;
+  try {
+    const token = crypto.randomBytes(16).toString("hex");
+    const expires = new Date(Date.now() + 1000 * 60 * 60); // 1 hour
+    user.telegramLinkToken = token;
+    user.telegramLinkTokenExpiresAt = expires;
+    await user.save();
+
+    const botName = process.env.TELEGRAM_BOT_USERNAME || process.env.TELEGRAM_BOT_NAME;
+    const deeplink = botName ? `https://t.me/${botName}?start=${token}` : null;
+
+    res.json({ token, deeplink, expiresAt: expires.toISOString() });
+  } catch (err) {
+    console.error("Failed to create telegram link token", err);
+    res.status(500).json({ message: "Не удалось создать токен привязки Telegram" });
+  }
+});
 profileRouter.patch("/me", auth, async (req: AuthedRequest, res) => {
   const body = profileUpdateSchema.safeParse(req.body);
   if (!body.success) {
