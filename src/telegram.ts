@@ -1183,7 +1183,45 @@ export function getTelegramBot() {
 
   const bot = new Telegraf(token);
 
-  bot.start((ctx) => sendMainMenu(ctx));
+bot.start(async (ctx) => {
+    const text = ctx.message && "text" in ctx.message ? ctx.message.text.replace(/^\/start(@\w+)?/i, "").trim() : "";
+    if (text) {
+      const token = text;
+      try {
+        const user = await UserModel.findOne({ telegramLinkToken: token, telegramLinkTokenExpiresAt: { $gt: new Date() } });
+        if (user) {
+          const existingTelegramUser = await UserModel.findOne({ telegramUserId: String(ctx.from?.id) });
+          if (existingTelegramUser && existingTelegramUser.id !== user.id) {
+            if (existingTelegramUser.emailVerified || existingTelegramUser.email) {
+              await ctx.reply("Этот Telegram уже привязан к другому подтвержденному аккаунту.");
+              return;
+            }
+
+            user.telegramActivityMessages = Math.max(user.telegramActivityMessages || 0, existingTelegramUser.telegramActivityMessages || 0);
+            user.telegramActivityScore = Math.max(user.telegramActivityScore || 0, existingTelegramUser.telegramActivityScore || 0);
+            user.telegramActivitySummary = user.telegramActivitySummary || existingTelegramUser.telegramActivitySummary || "";
+            user.telegramGroupChatId = user.telegramGroupChatId || existingTelegramUser.telegramGroupChatId;
+            user.telegramLastGroupSeenAt = user.telegramLastGroupSeenAt || existingTelegramUser.telegramLastGroupSeenAt;
+            await UserModel.deleteOne({ _id: existingTelegramUser._id });
+          }
+
+          user.telegramChatId = String(ctx.chat?.id);
+          user.telegramUserId = String(ctx.from?.id);
+          if (ctx.from?.username) user.telegramUsername = ctx.from.username.toLowerCase();
+          user.telegramLinkToken = undefined as any;
+          user.telegramLinkTokenExpiresAt = undefined as any;
+          await user.save();
+          await ctx.reply(`Telegram привязан к профилю: ${user.name}`, tileKeyboard);
+          await ctx.reply("Теперь можно пользоваться меню:", inlineMenu);
+          return;
+        }
+      } catch (error) {
+        console.error("Telegram start link error", error);
+      }
+    }
+
+    return sendMainMenu(ctx);
+  });
   bot.command("menu", (ctx) => sendMainMenu(ctx));
   bot.hears(["Меню", "Главное меню"], (ctx) => sendMainMenu(ctx));
   bot.hears("Привязка", (ctx) => sendLinkHelp(ctx));
