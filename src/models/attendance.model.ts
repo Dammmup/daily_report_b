@@ -9,11 +9,14 @@ const attendanceSchema = new Schema(
     mood: { type: String, enum: ["focused", "normal", "blocked"], required: true },
     latitude: { type: Number },
     longitude: { type: Number },
+    accuracyMeters: { type: Number },
     distanceMeters: { type: Number },
     officeLatitude: { type: Number },
     officeLongitude: { type: Number },
     officeRadiusMeters: { type: Number },
-    locationStatus: { type: String, enum: ["unconfigured", "verified", "out_of_range"], default: "unconfigured" }
+    locationStatus: { type: String, enum: ["unconfigured", "verified", "out_of_range"], default: "unconfigured" },
+    suspicious: { type: Boolean, default: false },
+    suspiciousReason: { type: String, default: "" }
   },
   { timestamps: true }
 );

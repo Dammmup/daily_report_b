@@ -6,6 +6,32 @@ import type { Category, DecisionCenter, PlanFitCandidate } from "./types.js";
 
 const activePlanFilter = { status: { $in: ["draft", "approved"] as const } } as any;
 
+function isPlanStepOverdue(step: { deadline: string; status: string }) {
+  return step.deadline < todayIso() && step.status !== "done" && step.status !== "canceled";
+}
+
+function buildPlanProgress(plan?: Awaited<ReturnType<typeof PlanModel.findOne>> | null) {
+  const steps = plan?.steps || [];
+  const total = steps.length;
+  const done = steps.filter((step) => step.status === "done").length;
+  const inProgress = steps.filter((step) => step.status === "in_progress").length;
+  const todo = steps.filter((step) => step.status === "todo").length;
+  const canceled = steps.filter((step) => step.status === "canceled").length;
+  const overdue = steps.filter(isPlanStepOverdue).length;
+  const unassigned = steps.filter((step) => !step.assignedTo).length;
+
+  return {
+    total,
+    done,
+    inProgress,
+    todo,
+    canceled,
+    overdue,
+    unassigned,
+    completionPercent: total ? Math.round((done / total) * 100) : 0
+  };
+}
+
 export function publicUser(user: UserDocument) {
   return {
     id: user.id,
@@ -27,6 +53,7 @@ export async function createDailyReport(input: {
   yesterday: string;
   todayPlan: string;
   blockers: string;
+  linkedStepIds?: string[];
   source: "web" | "telegram";
 }) {
   const user = await UserModel.findById(input.userId);
@@ -41,18 +68,27 @@ export async function createDailyReport(input: {
 
   const aiReview = await reviewReport(input);
   const now = new Date();
+  const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
+  const linkedStepIds =
+    user.role === "intern" && plan
+      ? (input.linkedStepIds || []).filter((stepId) => {
+          const step = plan.steps.id(stepId);
+          return Boolean(step && step.assignedTo?.toString() === user.id);
+        })
+      : [];
+
   const report = await ReportModel.create({
     userId: input.userId,
     date: todayIso(),
     yesterday: input.yesterday,
     todayPlan: input.todayPlan,
     blockers: input.blockers,
+    linkedStepIds,
     source: input.source,
     status: now.getHours() >= 10 ? "late" : "submitted",
     aiReview
   });
 
-  const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
   if (user.role === "intern" && plan && aiReview.deadlineImpactDays > 0) {
     plan.adjustedDeadline = addDays(plan.adjustedDeadline, aiReview.deadlineImpactDays);
     plan.aiRationale = `AI продлил срок на ${aiReview.deadlineImpactDays} дн. из-за блокера в дэйлике стажера.`;
@@ -114,9 +150,12 @@ export async function buildDashboard(category?: Category) {
       averageScore: scores.length ? Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length) : 0,
       activeToday: attendance.some((item) => item.userId.toString() === user.id && item.date === todayIso()),
       survey,
-      plan
+      plan,
+      assignedOpenSteps: plan?.steps.filter((step) => step.assignedTo?.toString() === user.id && step.status !== "done" && step.status !== "canceled").length || 0
     };
   });
+
+  const activePlans = plans.filter((plan) => ["draft", "approved"].includes(plan.status) && (!category || plan.category === category));
 
   return {
     stats: {
@@ -125,7 +164,15 @@ export async function buildDashboard(category?: Category) {
       reportsTotal: scopedReports.length,
       aiReviewedReports: scopedReports.filter((report) => report.aiReview).length,
       averageScore,
-      byCategory
+      byCategory,
+      plans: activePlans.map((plan) => ({
+        id: plan.id,
+        title: plan.title,
+        category: plan.category,
+        categoryLabel: categories[plan.category as Category],
+        adjustedDeadline: plan.adjustedDeadline,
+        progress: buildPlanProgress(plan)
+      }))
     },
     interns: internRows,
     reports: scopedReports
@@ -234,10 +281,22 @@ export async function formatLeadSummary(category?: Category, content: "productiv
   return [...productivity, ...reports].join("\n");
 }
 
-function textOf(value: unknown): string {
+function textOf(value: unknown, depth = 0): string {
+  if (depth > 4) return "";
   if (!value) return "";
   if (Array.isArray(value)) return value.join(" ");
-  if (typeof value === "object") return Object.values(value as Record<string, unknown>).map(textOf).join(" ");
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "object") {
+    const maybeDocument = value as { toObject?: (options?: unknown) => Record<string, unknown> };
+    const plain = typeof maybeDocument.toObject === "function"
+      ? maybeDocument.toObject({ depopulate: true, flattenMaps: true, versionKey: false })
+      : (value as Record<string, unknown>);
+
+    const allowed = Object.fromEntries(
+      Object.entries(plain).filter(([key]) => !key.startsWith("_") && !["schema", "$__", "$isNew", "db", "collection"].includes(key))
+    );
+    return Object.values(allowed).map((item) => textOf(item, depth + 1)).join(" ");
+  }
   return String(value);
 }
 

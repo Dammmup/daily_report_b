@@ -121,6 +121,12 @@ attendanceRouter.post("/check-in", auth, async (req: AuthedRequest, res) => {
       : undefined;
   const distance = officeLocation && point ? distanceMeters(point, officeLocation) : undefined;
   const locationStatus = officeLocation ? (distance! <= officeLocation.radiusMeters ? "verified" : "out_of_range") : "unconfigured";
+  const existingToday = await AttendanceModel.findOne({ userId: req.user!._id, date: todayIso() });
+  const suspiciousReasons = [
+    body.data.accuracyMeters && body.data.accuracyMeters > 150 ? `низкая точность GPS: ${Math.round(body.data.accuracyMeters)} м` : "",
+    existingToday ? "повторная отметка за день" : "",
+    locationStatus === "out_of_range" ? "вне радиуса офиса" : ""
+  ].filter(Boolean);
 
   const attendance = await AttendanceModel.findOneAndUpdate(
     { userId: req.user!._id, date: todayIso() },
@@ -129,11 +135,14 @@ attendanceRouter.post("/check-in", auth, async (req: AuthedRequest, res) => {
         mood: body.data.mood,
         latitude: body.data.latitude,
         longitude: body.data.longitude,
+        accuracyMeters: body.data.accuracyMeters,
         distanceMeters: distance,
         officeLatitude: officeLocation?.latitude,
         officeLongitude: officeLocation?.longitude,
         officeRadiusMeters: officeLocation?.radiusMeters,
-        locationStatus
+        locationStatus,
+        suspicious: suspiciousReasons.length > 0,
+        suspiciousReason: suspiciousReasons.join("; ")
       },
       $setOnInsert: { checkInAt: new Date() }
     },

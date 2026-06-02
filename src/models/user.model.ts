@@ -12,6 +12,8 @@ const userSchema = new Schema(
       required: false
     },
     avatarColor: { type: String, required: true },
+    avatarUrl: { type: String, default: "" },
+    bio: { type: String, default: "" },
     firstLoginCompleted: { type: Boolean, default: false },
     emailVerified: { type: Boolean, default: false },
     telegramChatId: { type: String },

@@ -8,6 +8,7 @@ const reportSchema = new Schema(
     yesterday: { type: String, required: true },
     todayPlan: { type: String, required: true },
     blockers: { type: String, default: "" },
+    linkedStepIds: { type: [Schema.Types.ObjectId], default: [] },
     source: { type: String, enum: ["web", "telegram"], default: "web" },
     status: { type: String, enum: ["submitted", "late"], default: "submitted" },
     aiReview: { type: aiReviewSchema }

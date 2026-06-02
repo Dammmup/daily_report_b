@@ -11,6 +11,7 @@ import { reportRouter } from "./report.routes.js";
 import { surveyRouter } from "./survey.routes.js";
 import { systemRouter } from "./system.routes.js";
 import { telegramRouter } from "./telegram.routes.js";
+import { uploadRouter } from "./upload.routes.js";
 
 export const apiRouter = Router();
 
@@ -19,6 +20,7 @@ apiRouter.use("/auth", authRouter);
 apiRouter.use(adminRouter);
 apiRouter.use(assistantRouter);
 apiRouter.use("/attendance", attendanceRouter);
+apiRouter.use(uploadRouter);
 apiRouter.use(profileRouter);
 apiRouter.use(departmentRouter);
 apiRouter.use(reportRouter);

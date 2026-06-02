@@ -1050,6 +1050,18 @@ async function sendReportHelp(ctx: Context) {
 }
 
 async function sendPlan(ctx: Context) {
+  if (isGroupChat(ctx)) {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const group = await TelegramGroupModel.findOne({ chatId: String(ctx.chat!.id) });
+    if (!group?.category) {
+      await replyTemporary(ctx, "Группа еще не привязана к департаменту.", groupDepartmentKeyboard(), 15000);
+      return;
+    }
+    const plan = await PlanModel.findOne({ category: group.category, ...activePlanFilter }).sort({ createdAt: -1 });
+    await replyTemporary(ctx, formatPlanForTelegram(plan), groupActionsKeyboard(group.motivationEnabled), 20000);
+    return;
+  }
+
   const user = await getLinkedUser(ctx);
   if (!user) {
     await ctx.reply("Сначала привяжите Telegram: /link ваш@email", Markup.inlineKeyboard([[Markup.button.callback("Как привязать", "link:help")]]));
@@ -1068,6 +1080,17 @@ async function sendPlan(ctx: Context) {
 }
 
 async function sendSummary(ctx: Context) {
+  if (isGroupChat(ctx)) {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const group = await TelegramGroupModel.findOne({ chatId: String(ctx.chat!.id) });
+    if (!group?.category) {
+      await replyTemporary(ctx, "Группа еще не привязана к департаменту.", groupDepartmentKeyboard(), 15000);
+      return;
+    }
+    await replyTemporary(ctx, await formatLeadSummary(group.category as Category, "full"), groupActionsKeyboard(group.motivationEnabled), 20000);
+    return;
+  }
+
   const user = await getLinkedUser(ctx);
   if (!user || user.role !== "lead") {
     await ctx.reply("Сводка доступна только привязанному тимлиду.", inlineMenu);
@@ -1078,6 +1101,12 @@ async function sendSummary(ctx: Context) {
 }
 
 async function sendDigestStatus(ctx: Context) {
+  if (isGroupChat(ctx)) {
+    if (!(await requireGroupAdmin(ctx))) return;
+    await replyTemporary(ctx, "Автосводка настраивается в личном чате тимлида с ботом.", undefined, 10000);
+    return;
+  }
+
   const user = await getLinkedUser(ctx);
   if (!user || user.role !== "lead") {
     await ctx.reply("Автосводка доступна только привязанному тимлиду.", inlineMenu);
@@ -1275,6 +1304,11 @@ export function getTelegramBot() {
   });
 
   bot.command("link", async (ctx) => {
+    if (!isPrivateChat(ctx)) {
+      await replyTemporary(ctx, "Привязка аккаунта выполняется только в личном чате с ботом. Напишите боту в личку: /link email@example.com", undefined, 12000);
+      return;
+    }
+
     const email = ctx.message.text.replace(/^\/link(@\w+)?/i, "").trim().toLowerCase();
     if (!email) {
       await sendLinkHelp(ctx);
@@ -1286,6 +1320,21 @@ export function getTelegramBot() {
       if (!user || !user.emailVerified) {
         await ctx.reply("Пользователь не найден или email еще не подтвержден на сайте.", inlineMenu);
         return;
+      }
+
+      const existingTelegramUser = await UserModel.findOne({ telegramUserId: String(ctx.from.id) });
+      if (existingTelegramUser && existingTelegramUser.id !== user.id) {
+        if (existingTelegramUser.emailVerified || existingTelegramUser.email) {
+          await ctx.reply("Этот Telegram уже привязан к другому подтвержденному аккаунту.");
+          return;
+        }
+
+        user.telegramActivityMessages = Math.max(user.telegramActivityMessages || 0, existingTelegramUser.telegramActivityMessages || 0);
+        user.telegramActivityScore = Math.max(user.telegramActivityScore || 0, existingTelegramUser.telegramActivityScore || 0);
+        user.telegramActivitySummary = user.telegramActivitySummary || existingTelegramUser.telegramActivitySummary || "";
+        user.telegramGroupChatId = user.telegramGroupChatId || existingTelegramUser.telegramGroupChatId;
+        user.telegramLastGroupSeenAt = user.telegramLastGroupSeenAt || existingTelegramUser.telegramLastGroupSeenAt;
+        await UserModel.deleteOne({ _id: existingTelegramUser._id });
       }
 
       user.telegramChatId = String(ctx.chat.id);
@@ -1341,6 +1390,12 @@ export function getTelegramBot() {
   bot.command("summary", (ctx) => sendSummary(ctx));
 
   bot.command("digest", async (ctx) => {
+    if (isGroupChat(ctx)) {
+      if (!(await requireGroupAdmin(ctx))) return;
+      await replyTemporary(ctx, "Автосводка настраивается в личном чате тимлида с ботом.", undefined, 10000);
+      return;
+    }
+
     try {
       const user = await getLinkedUser(ctx);
       if (!user || user.role !== "lead") {
@@ -1392,6 +1447,16 @@ export function getTelegramBot() {
     { command: "digest", description: "Автосводка для тимлида" },
     { command: "link", description: "Привязать Telegram к аккаунту" }
   ]);
+
+  void bot.telegram
+    .setChatMenuButton({
+      menuButton: {
+        type: "web_app",
+        text: "DailyReport ERP",
+        web_app: { url: appUrl }
+      }
+    })
+    .catch(() => undefined);
 
   botInstance = bot;
   startDigestScheduler(bot);

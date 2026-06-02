@@ -32,7 +32,8 @@ export const loginSchema = z.object({
 export const attendanceSchema = z.object({
   mood: z.enum(["focused", "normal", "blocked"]),
   latitude: z.number().min(-90).max(90).optional(),
-  longitude: z.number().min(-180).max(180).optional()
+  longitude: z.number().min(-180).max(180).optional(),
+  accuracyMeters: z.number().min(0).max(10000).optional()
 });
 
 export const officeLocationSchema = z.object({
@@ -46,7 +47,8 @@ export const officeLocationSchema = z.object({
 export const reportSchema = z.object({
   yesterday: z.string().min(10),
   todayPlan: z.string().min(10),
-  blockers: z.string().default("")
+  blockers: z.string().default(""),
+  linkedStepIds: z.array(z.string()).default([])
 });
 
 export const surveySchema = z.object({
@@ -96,4 +98,32 @@ export const telegramDigestSchema = z.object({
 export const assistantPlanFitSchema = z.object({
   question: z.string().min(5).max(1200),
   planId: z.string().optional()
+});
+
+export const profileUpdateSchema = z.object({
+  name: z.string().min(2).max(120),
+  avatarColor: z.string().min(4).max(32).optional(),
+  avatarUrl: z.string().url().optional().or(z.literal("")),
+  bio: z.string().max(500).optional()
+});
+
+export const passwordChangeSchema = z.object({
+  currentPassword: z.string().min(4),
+  newPassword: z.string().min(4)
+});
+
+export const stepCommentSchema = z.object({
+  text: z.string().min(1).max(1000)
+});
+
+export const stepArtifactSchema = z.object({
+  title: z.string().min(2).max(160),
+  url: z.string().url()
+});
+
+export const reportUpdateSchema = z.object({
+  yesterday: z.string().min(10),
+  todayPlan: z.string().min(10),
+  blockers: z.string().default(""),
+  linkedStepIds: z.array(z.string()).default([])
 });
