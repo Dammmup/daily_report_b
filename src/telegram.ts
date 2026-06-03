@@ -194,6 +194,7 @@ function digestContentLabel(content?: string) {
 }
 
 type PlanStepStatus = "todo" | "in_progress" | "done" | "canceled";
+type TelegramPlanDocument = NonNullable<Awaited<ReturnType<typeof PlanModel.findOne>>>;
 
 function stepStatusLabel(status: string) {
   if (status === "done") return "готово";
@@ -223,6 +224,35 @@ function formatPlanForTelegram(plan: Awaited<ReturnType<typeof PlanModel.findOne
     plan.aiRationale,
     steps ? `Шаги:\n${steps}` : `Этапы:\n${plan.milestones.join("\n")}`
   ].join("\n");
+}
+
+async function findActivePlans(category: Category | string, limit = 5) {
+  return PlanModel.find({ category, ...activePlanFilter }).sort({ createdAt: -1 }).limit(limit);
+}
+
+function formatPlansForTelegram(plans: TelegramPlanDocument[], chatUserId?: string) {
+  if (!plans.length) return "Планы для вашего департамента еще не созданы.";
+  if (plans.length === 1) return formatPlanForTelegram(plans[0], chatUserId);
+
+  return [
+    `Активные планы департамента: ${plans.length}`,
+    ...plans.map((plan, planIndex) => {
+      const steps = (plan.steps || [])
+        .slice(0, 6)
+        .map((step, index) => {
+          const assigned = step.assignedTo?.toString() === chatUserId ? " | назначено вам" : step.assignedTo ? " | назначено" : "";
+          return `   ${index + 1}. ${step.title} - до ${step.deadline} | ${stepStatusLabel(step.status)}${assigned}`;
+        })
+        .join("\n");
+
+      return [
+        `${planIndex + 1}. ${plan.title}`,
+        `   Версия: #${plan.version || planIndex + 1} | дедлайн: ${plan.adjustedDeadline}`,
+        `   Изменен: ${plan.updatedAt.toISOString().slice(0, 16).replace("T", " ")}`,
+        steps ? `   Шаги:\n${steps}` : `   Этапы: ${plan.milestones.slice(0, 4).join("; ")}`
+      ].join("\n");
+    })
+  ].join("\n\n");
 }
 
 function isServerlessRuntime() {
@@ -278,7 +308,7 @@ function groupMenuKeyboard(enabled?: boolean) {
 async function askGroupDepartment(ctx: Context) {
   if (!(await requireGroupAdmin(ctx))) return;
 
-  await ctx.reply("Выберите департамент для этой группы:", groupDepartmentKeyboard());
+  await replyTemporary(ctx, "Выберите департамент для этой группы:", groupDepartmentKeyboard(), 15000);
 }
 
 function mainMenuKeyboard(role?: string) {
@@ -478,8 +508,8 @@ async function answerGroupQuestion(ctx: Context, text: string) {
     return true;
   }
 
-  const [plan, interns, reports] = await Promise.all([
-    PlanModel.findOne({ category, ...activePlanFilter }).sort({ createdAt: -1 }),
+  const [plans, interns, reports] = await Promise.all([
+    findActivePlans(category, 5),
     UserModel.find({ role: "intern", category }).sort({ telegramActivityScore: -1 }).limit(8),
     ReportModel.find({ date: todayIso() }).sort({ createdAt: -1 }).limit(20)
   ]);
@@ -495,9 +525,10 @@ async function answerGroupQuestion(ctx: Context, text: string) {
 ${text}
 
 Департамент: ${categories[category]}
-План: ${plan ? `${plan.title}, дедлайн ${plan.adjustedDeadline}` : "нет активного плана"}
+Активные планы:
+${plans.map((plan) => `- ${plan.title}, дедлайн ${plan.adjustedDeadline}, версия #${plan.version || 1}`).join("\n") || "нет активных планов"}
 Шаги:
-${(plan?.steps || []).slice(0, 10).map((step) => `- ${step.title}; статус ${stepStatusLabel(step.status)}; дедлайн ${step.deadline}; ${step.assignedTo ? "назначен" : "свободен"}`).join("\n") || "нет шагов"}
+${plans.flatMap((plan) => (plan.steps || []).map((step) => `- ${plan.title}: ${step.title}; статус ${stepStatusLabel(step.status)}; дедлайн ${step.deadline}; ${step.assignedTo ? "назначен" : "свободен"}`)).slice(0, 15).join("\n") || "нет шагов"}
 
 Стажеры:
 ${interns.map((user) => `- ${user.name}; активность ${user.telegramActivityScore || 0}; ${user.telegramActivitySummary || "сводки нет"}`).join("\n") || "нет стажеров"}
@@ -571,7 +602,7 @@ async function trackNewGroupMembers(ctx: Context) {
   }
 
   if (!category) {
-    await ctx.reply("Вижу новых участников, но группа еще не привязана к департаменту.", groupDepartmentKeyboard());
+    await ctx.reply("Вижу новых участников, но группа еще не привязана к департаменту. Администратор может выбрать департамент командой /group_department.");
     return;
   }
 
@@ -653,13 +684,13 @@ async function sendGroupStatus(ctx: Context) {
   }
 
   const members = await UserModel.countDocuments({ telegramGroupChatId: String(ctx.chat.id), role: "intern" });
-  const plan = await PlanModel.findOne({ category: group.category, ...activePlanFilter }).sort({ createdAt: -1 });
+  const plans = await findActivePlans(group.category as Category, 5);
   await replyTemporary(ctx,
     [
       `Департамент: ${categories[group.category as Category]}`,
       `Стажеров найдено по чату: ${members}`,
       `Мотивация: ${group.motivationEnabled ? "включена" : "выключена"}`,
-      plan ? `План: ${plan.title}, дедлайн ${plan.adjustedDeadline}` : "План департамента еще не создан"
+      plans.length ? `Активных планов: ${plans.length}. Последний: ${plans[0].title}, дедлайн ${plans[0].adjustedDeadline}` : "План департамента еще не создан"
     ].join("\n"),
     undefined,
     15000
@@ -719,13 +750,13 @@ async function sendGroupStatusWithButtons(ctx: Context) {
   }
 
   const members = await UserModel.countDocuments({ telegramGroupChatId: String(ctx.chat.id), role: "intern" });
-  const plan = await PlanModel.findOne({ category: group.category, ...activePlanFilter }).sort({ createdAt: -1 });
+  const plans = await findActivePlans(group.category as Category, 5);
   await replyTemporary(ctx,
     [
       `Департамент: ${categories[group.category as Category]}`,
       `Стажеров найдено по чату: ${members}`,
       `Мотивация: ${group.motivationEnabled ? "включена" : "выключена"}`,
-      plan ? `План: ${plan.title}, дедлайн ${plan.adjustedDeadline}` : "План департамента еще не создан"
+      plans.length ? `Активных планов: ${plans.length}. Последний: ${plans[0].title}, дедлайн ${plans[0].adjustedDeadline}` : "План департамента еще не создан"
     ].join("\n"),
     groupActionsKeyboard(group.motivationEnabled),
     15000
@@ -733,16 +764,24 @@ async function sendGroupStatusWithButtons(ctx: Context) {
 }
 
 async function buildMotivationMessage(category: Category) {
-  const [plan, interns] = await Promise.all([
-    PlanModel.findOne({ category, ...activePlanFilter }).sort({ createdAt: -1 }),
+  const [plans, interns] = await Promise.all([
+    findActivePlans(category, 5),
     UserModel.find({ role: "intern", category }).sort({ telegramActivityScore: -1 }).limit(5)
   ]);
-  const openSteps = (plan?.steps || []).filter((step) => step.status !== "done" && step.status !== "canceled").slice(0, 4);
+  const openSteps = plans
+    .flatMap((plan) =>
+      (plan.steps || [])
+        .filter((step) => step.status !== "done" && step.status !== "canceled")
+        .map((step) => ({ plan, step }))
+    )
+    .slice(0, 6);
   const activeNames = interns.filter((user) => (user.telegramActivityMessages || 0) > 0).map((user) => user.name).slice(0, 4);
 
   const fallback = [
     `Доброе утро, ${categories[category]}.`,
-    plan ? `Фокус по плану "${plan.title}": ${openSteps.map((step) => step.title).join("; ") || "держим текущий темп"}.` : "Сегодня держим фокус на задачах департамента.",
+    plans.length
+      ? `Активных планов: ${plans.length}. Фокус: ${openSteps.map(({ plan, step }) => `${plan.title}: ${step.title}`).join("; ") || "держим текущий темп"}.`
+      : "Сегодня держим фокус на задачах департамента.",
     activeNames.length ? `Отдельно вижу активность: ${activeNames.join(", ")}. Хороший ритм.` : "Пишите вопросы и блокеры в чат, так тимлид быстрее поможет.",
     "Коротко зафиксируйте прогресс в дэйлике и не тяните с блокерами."
   ].join("\n");
@@ -751,9 +790,10 @@ async function buildMotivationMessage(category: Category) {
 Сгенерируй короткое мотивирующее сообщение в Telegram-группу стажеров.
 Тон: дружелюбно, без пафоса, 3-5 предложений.
 Департамент: ${categories[category]}
-План: ${plan?.title || "план еще не создан"}
-Дедлайн: ${plan?.adjustedDeadline || "не задан"}
-Открытые шаги: ${openSteps.map((step) => `${step.title} до ${step.deadline}`).join("; ") || "нет данных"}
+Активные планы:
+${plans.map((plan) => `- ${plan.title}; дедлайн ${plan.adjustedDeadline}; шагов ${plan.steps.length}`).join("\n") || "план еще не создан"}
+Открытые шаги:
+${openSteps.map(({ plan, step }) => `- ${plan.title}: ${step.title} до ${step.deadline}`).join("\n") || "нет данных"}
 Активные стажеры: ${activeNames.join(", ") || "нет данных"}
 `);
   return ai || fallback;
@@ -770,7 +810,8 @@ export async function sendWeekdayGroupMotivation() {
   const dayKey = now.toISOString().slice(0, 10);
   const groups = await TelegramGroupModel.find({
     category: { $exists: true },
-    motivationEnabled: true
+    motivationEnabled: true,
+    chatId: { $type: "string", $ne: "" }
   });
 
   let sent = 0;
@@ -778,11 +819,21 @@ export async function sendWeekdayGroupMotivation() {
     const lastSentDay = group.motivationLastSentAt?.toISOString().slice(0, 10);
     if (lastSentDay === dayKey) continue;
 
-    const message = await buildMotivationMessage(group.category as Category);
-    await bot.telegram.sendMessage(group.chatId, message);
-    group.motivationLastSentAt = now;
-    await group.save();
-    sent += 1;
+    try {
+      const [plansCount, internsCount] = await Promise.all([
+        PlanModel.countDocuments({ category: group.category, ...activePlanFilter }),
+        UserModel.countDocuments({ role: "intern", category: group.category })
+      ]);
+      if (!plansCount || !internsCount || !group.chatId?.trim()) continue;
+
+      const message = await buildMotivationMessage(group.category as Category);
+      await bot.telegram.sendMessage(group.chatId, message);
+      group.motivationLastSentAt = now;
+      await group.save();
+      sent += 1;
+    } catch (error) {
+      console.error("Telegram weekday motivation error", error);
+    }
   }
 
   return { sent };
@@ -804,12 +855,12 @@ async function sendGroupMotivationNow(ctx: Context) {
   }
 
   const message = await buildMotivationMessage(group.category as Category);
-  await ctx.reply(message, groupActionsKeyboard(group.motivationEnabled));
+  await ctx.reply(message);
 }
 
 async function buildGroupDailyDigest(category: Category) {
-  const [plan, interns, todayReports] = await Promise.all([
-    PlanModel.findOne({ category, ...activePlanFilter }).sort({ createdAt: -1 }),
+  const [plans, interns, todayReports] = await Promise.all([
+    findActivePlans(category, 5),
     UserModel.find({ role: "intern", category }).sort({ telegramActivityScore: -1 }),
     ReportModel.find({ date: todayIso() })
   ]);
@@ -819,7 +870,7 @@ async function buildGroupDailyDigest(category: Category) {
   const reportUserIds = new Set(departmentReports.map((report) => report.userId.toString()));
   const missing = interns.filter((user) => !reportUserIds.has(user.id)).slice(0, 6);
   const blockers = departmentReports.filter((report) => report.blockers?.trim()).slice(0, 4);
-  const steps = plan?.steps || [];
+  const steps = plans.flatMap((plan) => plan.steps || []);
   const openSteps = steps.filter((step) => step.status !== "done" && step.status !== "canceled");
   const doneSteps = steps.filter((step) => step.status === "done");
   const avgScore = departmentReports.length
@@ -828,8 +879,8 @@ async function buildGroupDailyDigest(category: Category) {
 
   return [
     `Дневной дайджест: ${categories[category]}`,
-    plan ? `План: ${plan.title}` : "Активный план пока не создан.",
-    plan ? `Шаги: ${doneSteps.length}/${steps.length} готово, ${openSteps.length} открыто.` : "",
+    plans.length ? `Активных планов: ${plans.length}. ${plans.map((plan) => plan.title).slice(0, 3).join("; ")}` : "Активный план пока не создан.",
+    plans.length ? `Шаги по всем планам: ${doneSteps.length}/${steps.length} готово, ${openSteps.length} открыто.` : "",
     `Дэйлики сегодня: ${departmentReports.length}/${interns.length}`,
     departmentReports.length ? `Средняя продуктивность по AI: ${avgScore}%` : "AI еще не получил сегодняшние дэйлики.",
     missing.length ? `Еще ждут дэйлик: ${missing.map((user) => user.name).join(", ")}` : "Все найденные стажеры уже отправили дэйлик.",
@@ -855,7 +906,7 @@ async function sendGroupDailyDigestNow(ctx: Context) {
     return;
   }
 
-  await ctx.reply(await buildGroupDailyDigest(group.category as Category), groupActionsKeyboard(group.motivationEnabled));
+  await ctx.reply(await buildGroupDailyDigest(group.category as Category));
 }
 
 export async function sendWeekdayGroupDailyDigests() {
@@ -873,7 +924,7 @@ export async function sendWeekdayGroupDailyDigests() {
   for (const group of groups) {
     if (isSameIsoDay(group.groupDigestLastSentAt)) continue;
     try {
-      await bot.telegram.sendMessage(group.chatId, await buildGroupDailyDigest(group.category as Category), groupActionsKeyboard(group.motivationEnabled));
+      await bot.telegram.sendMessage(group.chatId, await buildGroupDailyDigest(group.category as Category));
       group.groupDigestLastSentAt = new Date();
       await group.save();
       sent += 1;
@@ -900,18 +951,26 @@ export async function sendWeekdayPersonalFocus() {
   for (const user of interns) {
     if (isSameIsoDay(user.telegramFocusLastSentAt)) continue;
     if (!user.telegramChatId?.trim()) continue;
-    const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
-    if (!plan) continue;
+    const plans = await findActivePlans(user.category as Category, 5);
+    if (!plans.length) continue;
 
-    const assigned = (plan.steps || []).filter((step) => step.assignedTo?.toString() === user.id && step.status !== "done" && step.status !== "canceled");
-    const available = (plan.steps || []).filter((step) => !step.assignedTo && step.status !== "done" && step.status !== "canceled");
+    const assigned = plans.flatMap((plan) =>
+      (plan.steps || [])
+        .filter((step) => step.assignedTo?.toString() === user.id && step.status !== "done" && step.status !== "canceled")
+        .map((step) => ({ plan, step }))
+    );
+    const available = plans.flatMap((plan) =>
+      (plan.steps || [])
+        .filter((step) => !step.assignedTo && step.status !== "done" && step.status !== "canceled")
+        .map((step) => ({ plan, step }))
+    );
     const focus = assigned[0] || available[0];
     if (!focus) continue;
 
     const message = [
-      `Фокус дня по плану "${plan.title}"`,
-      assigned.length ? `Ваш текущий шаг: ${focus.title}` : `Можно взять свободный шаг: ${focus.title}`,
-      `Дедлайн: ${focus.deadline}`,
+      `Фокус дня по плану "${focus.plan.title}"`,
+      assigned.length ? `Ваш текущий шаг: ${focus.step.title}` : `Можно взять свободный шаг: ${focus.step.title}`,
+      `Дедлайн: ${focus.step.deadline}`,
       "Если есть блокер, лучше зафиксировать его сразу."
     ].join("\n");
 
@@ -1037,17 +1096,11 @@ export async function notifyDepartmentPlanChange(input: {
     "Стажеры: откройте личный чат с ботом и нажмите «Свободные шаги», чтобы выбрать задачу для работы."
   ].join("\n");
 
-  const groupButtons = Markup.inlineKeyboard([
-    [Markup.button.callback("План группы", "plan:view")],
-    [Markup.button.callback("Свободные шаги в личке", "tasks:available")],
-    [Markup.button.webApp("Открыть приложение", appUrl)]
-  ]);
-
   let groupSent = 0;
   for (const group of groups) {
     try {
       if (!group.chatId?.trim()) continue;
-      await bot.telegram.sendMessage(group.chatId, groupMessage, groupButtons);
+      await bot.telegram.sendMessage(group.chatId, groupMessage);
       groupSent += 1;
     } catch (error) {
       console.error("Telegram group plan change notification error", error);
@@ -1083,7 +1136,7 @@ export async function sendTelegramRecoveryBroadcast() {
   for (const group of groups) {
     try {
       if (!group.chatId?.trim() || !group.category) continue;
-      await bot.telegram.sendMessage(group.chatId, await buildMotivationMessage(group.category as Category), groupActionsKeyboard(group.motivationEnabled));
+      await bot.telegram.sendMessage(group.chatId, await buildMotivationMessage(group.category as Category));
       motivationMessages += 1;
     } catch (error) {
       console.error("Telegram manual motivation broadcast error", error);
@@ -1115,14 +1168,7 @@ export async function sendTelegramRecoveryBroadcast() {
     for (const group of planGroups) {
       try {
         if (!group.chatId?.trim()) continue;
-        await bot.telegram.sendMessage(
-          group.chatId,
-          message,
-          Markup.inlineKeyboard([
-            [Markup.button.callback("План группы", "plan:view"), Markup.button.callback("Свободные шаги в личке", "tasks:available")],
-            [Markup.button.webApp("Открыть приложение", appUrl)]
-          ])
-        );
+        await bot.telegram.sendMessage(group.chatId, message);
         sentForPlan += 1;
         planAnnouncementMessages += 1;
       } catch (error) {
@@ -1197,18 +1243,18 @@ async function answerPrivateVoiceQuestion(ctx: Context, text: string) {
     return;
   }
 
-  const plan = user.category ? await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 }) : null;
-  const assignedSteps = (plan?.steps || []).filter((step) => step.assignedTo?.toString() === user.id);
-  const allSteps = (plan?.steps || []).slice(0, 10);
+  const plans = user.category ? await findActivePlans(user.category as Category, 5) : [];
+  const assignedSteps = plans.flatMap((plan) => (plan.steps || []).filter((step) => step.assignedTo?.toString() === user.id).map((step) => ({ plan, step })));
+  const allSteps = plans.flatMap((plan) => (plan.steps || []).map((step) => ({ plan, step }))).slice(0, 10);
   const context = [
     `Пользователь: ${user.name}`,
     `Роль: ${user.role}`,
     `Департамент: ${user.category ? categories[user.category as Category] : "не выбран"}`,
-    plan ? `Активный план: ${plan.title}, дедлайн ${plan.adjustedDeadline}` : "Активного плана нет",
+    plans.length ? `Активные планы:\n${plans.map((plan) => `- ${plan.title}, дедлайн ${plan.adjustedDeadline}`).join("\n")}` : "Активных планов нет",
     assignedSteps.length
-      ? `Назначенные шаги:\n${assignedSteps.map((step, index) => `${index + 1}. ${step.title}; дедлайн ${step.deadline}; статус ${stepStatusLabel(step.status)}`).join("\n")}`
+      ? `Назначенные шаги:\n${assignedSteps.map(({ plan, step }, index) => `${index + 1}. ${plan.title}: ${step.title}; дедлайн ${step.deadline}; статус ${stepStatusLabel(step.status)}`).join("\n")}`
       : "Назначенных лично шагов нет",
-    allSteps.length ? `Все шаги плана:\n${allSteps.map((step, index) => `${index + 1}. ${step.title}; ${stepStatusLabel(step.status)}`).join("\n")}` : ""
+    allSteps.length ? `Все шаги планов:\n${allSteps.map(({ plan, step }, index) => `${index + 1}. ${plan.title}: ${step.title}; ${stepStatusLabel(step.status)}`).join("\n")}` : ""
   ].join("\n");
 
   const answer = await askGroqAssistant(`
@@ -1254,13 +1300,17 @@ async function sendMyTasks(ctx: Context) {
     return;
   }
 
-  const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
-  if (!plan) {
+  const plans = await findActivePlans(user.category as Category, 5);
+  if (!plans.length) {
     await ctx.reply("План департамента еще не создан.", mainMenuKeyboard(user.role));
     return;
   }
 
-  const assignedSteps = (plan.steps || []).filter((step) => step.assignedTo?.toString() === user.id);
+  const assignedSteps = plans.flatMap((plan) =>
+    (plan.steps || [])
+      .filter((step) => step.assignedTo?.toString() === user.id)
+      .map((step) => ({ plan, step }))
+  );
   if (!assignedSteps.length) {
     await ctx.reply(
       "Пока нет назначенных лично вам шагов. Можно выбрать свободный шаг из плана департамента.",
@@ -1269,11 +1319,11 @@ async function sendMyTasks(ctx: Context) {
     return;
   }
 
-  await ctx.reply(`Ваши задачи по плану "${plan.title}":`);
-  for (const step of assignedSteps.slice(0, 8)) {
+  await ctx.reply(`Ваши задачи по активным планам:`);
+  for (const { plan, step } of assignedSteps.slice(0, 10)) {
     const status = stepStatusLabel(step.status);
     await ctx.reply(
-      [`${step.title}`, step.description ? `Описание: ${step.description}` : "", `Дедлайн: ${step.deadline}`, `Статус: ${status}`].filter(Boolean).join("\n"),
+      [`План: ${plan.title}`, `${step.title}`, step.description ? `Описание: ${step.description}` : "", `Дедлайн: ${step.deadline}`, `Статус: ${status}`].filter(Boolean).join("\n"),
       taskKeyboard(step._id.toString(), step.status)
     );
   }
@@ -1288,27 +1338,27 @@ async function sendAllPlanSteps(ctx: Context) {
     return;
   }
 
-  const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
-  if (!plan) {
+  const plans = await findActivePlans(user.category as Category, 5);
+  if (!plans.length) {
     await ctx.reply("План департамента еще не создан.", mainMenuKeyboard(user.role));
     return;
   }
 
-  const steps = (plan.steps || []).slice(0, 12);
+  const steps = plans.flatMap((plan) => (plan.steps || []).map((step) => ({ plan, step }))).slice(0, 15);
   const lines = steps.map((step, index) => {
-    const status = stepStatusLabel(step.status);
-    const mine = step.assignedTo?.toString() === user.id ? " | ваше" : "";
-    const assigned = step.assignedTo && step.assignedTo.toString() !== user.id ? " | уже назначен" : "";
-    return `${index + 1}. ${step.title} - до ${step.deadline} | ${status}${mine}${assigned}`;
+    const status = stepStatusLabel(step.step.status);
+    const mine = step.step.assignedTo?.toString() === user.id ? " | ваше" : "";
+    const assigned = step.step.assignedTo && step.step.assignedTo.toString() !== user.id ? " | уже назначен" : "";
+    return `${index + 1}. ${step.plan.title}: ${step.step.title} - до ${step.step.deadline} | ${status}${mine}${assigned}`;
   });
 
   const claimRows = steps
-    .filter((step) => !step.assignedTo && step.status !== "done" && step.status !== "canceled")
+    .filter(({ step }) => !step.assignedTo && step.status !== "done" && step.status !== "canceled")
     .slice(0, 8)
-    .map((step, index) => [Markup.button.callback(`Взять шаг ${index + 1}`, `task:claim:${step._id.toString()}`)]);
+    .map(({ step }, index) => [Markup.button.callback(`Взять шаг ${index + 1}`, `task:claim:${step._id.toString()}`)]);
 
   await ctx.reply(
-    lines.length ? [`План "${plan.title}"`, ...lines].join("\n") : "В плане пока нет шагов.",
+    lines.length ? [`Активные планы: ${plans.length}`, ...lines].join("\n") : "В планах пока нет шагов.",
     claimRows.length
       ? Markup.inlineKeyboard([...claimRows, [Markup.button.callback("Мои задачи", "tasks:mine"), Markup.button.callback("Меню", "menu:view")]])
       : planKeyboard()
@@ -1323,7 +1373,7 @@ async function claimPlanStep(ctx: Context, stepId: string) {
     return;
   }
 
-  const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
+  const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter, "steps._id": stepId } as any).sort({ createdAt: -1 });
   const step = plan?.steps.id(stepId);
   if (!plan || !step) {
     await ctx.reply("Этот шаг уже недоступен или план был обновлен.", planKeyboard());
@@ -1349,7 +1399,7 @@ async function updateTaskStatus(ctx: Context, stepId: string, status: PlanStepSt
   if (!(await requirePrivateChat(ctx, "Статус личной задачи меняется только в личном чате с ботом."))) return;
   const user = await requireLinkedUser(ctx);
   if (!user?.category) return;
-  const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
+  const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter, "steps._id": stepId } as any).sort({ createdAt: -1 });
   const step = plan?.steps.id(stepId);
   if (!plan || !step || step.assignedTo?.toString() !== user.id) {
     await ctx.reply("Эта задача не найдена среди назначенных вам шагов.");
@@ -1559,8 +1609,8 @@ async function sendPlan(ctx: Context) {
       await replyTemporary(ctx, "Группа еще не привязана к департаменту.", groupDepartmentKeyboard(), 15000);
       return;
     }
-    const plan = await PlanModel.findOne({ category: group.category, ...activePlanFilter }).sort({ createdAt: -1 });
-    await replyTemporary(ctx, formatPlanForTelegram(plan), groupActionsKeyboard(group.motivationEnabled), 20000);
+    const plans = await findActivePlans(group.category as Category, 5);
+    await ctx.reply(formatPlansForTelegram(plans));
     return;
   }
 
@@ -1574,9 +1624,9 @@ async function sendPlan(ctx: Context) {
     return;
   }
 
-  const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
+  const plans = await findActivePlans(user.category as Category, 5);
   await ctx.reply(
-    formatPlanForTelegram(plan, user.id),
+    formatPlansForTelegram(plans, user.id),
     Markup.inlineKeyboard([[Markup.button.callback("Как написать дэйлик", "report:help"), Markup.button.callback("Обновить", "plan:view")]])
   );
 }
@@ -1589,7 +1639,7 @@ async function sendSummary(ctx: Context) {
       await replyTemporary(ctx, "Группа еще не привязана к департаменту.", groupDepartmentKeyboard(), 15000);
       return;
     }
-    await replyTemporary(ctx, await formatLeadSummary(group.category as Category, "full"), groupActionsKeyboard(group.motivationEnabled), 20000);
+    await replyTemporary(ctx, await formatLeadSummary(group.category as Category, "full"), undefined, 20000);
     return;
   }
 

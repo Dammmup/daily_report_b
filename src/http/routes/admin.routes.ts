@@ -10,11 +10,6 @@ import { adminPlanSchema, adminUserUpdateSchema } from "../schemas.js";
 import { publicUser, serializePlan, serializeReport } from "../serializers.js";
 
 export const adminRouter = Router();
-const activePlanStatuses = ["draft", "approved"] as const;
-
-function activePlanQuery(category: Category | string) {
-  return { category, status: { $in: activePlanStatuses } } as any;
-}
 
 async function notifyAdminPlanChangeSafely(input: Parameters<typeof notifyDepartmentPlanChange>[0]) {
   try {
@@ -64,7 +59,7 @@ adminRouter.get("/admin/interns/:id", auth, requireRole("admin"), async (req: Au
 });
 
 adminRouter.get("/admin/plans", auth, requireRole("admin"), async (_req: AuthedRequest, res) => {
-  const plans = await PlanModel.find().sort({ category: 1 });
+  const plans = await PlanModel.find().sort({ category: 1, createdAt: -1 });
   const leads = await UserModel.find({ _id: { $in: plans.map((plan) => plan.leadId) } });
 
   res.json(
@@ -94,8 +89,7 @@ adminRouter.post("/admin/plans/preview", auth, requireRole("admin"), async (req:
   }
 
   const category = body.data.category as Category;
-  const existing = await PlanModel.findOne(activePlanQuery(category)).sort({ createdAt: -1 });
-  const startDate = existing?.startDate || todayIso();
+  const startDate = todayIso();
   const steps = await decomposeProjectPlan({
     title: body.data.title,
     milestones: body.data.milestones,
@@ -106,7 +100,7 @@ adminRouter.post("/admin/plans/preview", auth, requireRole("admin"), async (req:
 
   res.json({
     startDate,
-    adjustedDeadline: existing?.adjustedDeadline || body.data.baseDeadline,
+    adjustedDeadline: body.data.baseDeadline,
     steps: steps.map((step) => ({
       title: step.title,
       description: step.description || "",
@@ -145,8 +139,7 @@ adminRouter.post("/admin/plans", auth, requireRole("admin"), async (req: AuthedR
     await lead.save();
   }
 
-  const existing = await PlanModel.findOne(activePlanQuery(category)).sort({ createdAt: -1 });
-  const startDate = existing?.startDate || todayIso();
+  const startDate = todayIso();
   const steps = body.data.steps?.length
     ? body.data.steps.map((step) => ({
         title: step.title,
@@ -170,20 +163,18 @@ adminRouter.post("/admin/plans", auth, requireRole("admin"), async (req: AuthedR
     leadId: lead._id,
     title: body.data.title,
     category,
-    version: existing?.version || (await PlanModel.countDocuments({ category })) + 1,
+    version: (await PlanModel.countDocuments({ category })) + 1,
     status: "approved" as const,
     startDate,
     baseDeadline: body.data.baseDeadline,
-    adjustedDeadline: existing?.adjustedDeadline || body.data.baseDeadline,
+    adjustedDeadline: body.data.baseDeadline,
     milestones: body.data.milestones,
     steps,
-    issues: existing?.issues || [],
+    issues: [],
     aiRationale: "AI разложил утвержденный администратором план на шаги. Тимлид может уточнить ТЗ, инструкции и назначить исполнителей."
   };
 
-  const plan = existing
-    ? await PlanModel.findByIdAndUpdate(existing._id, payload, { returnDocument: "after" })
-    : await PlanModel.create(payload);
+  const plan = await PlanModel.create(payload);
 
   if (!plan) {
     res.status(500).json({ message: "Не удалось сохранить план" });
@@ -194,9 +185,9 @@ adminRouter.post("/admin/plans", auth, requireRole("admin"), async (req: AuthedR
     planId: plan.id,
     category,
     actorId: req.user!.id,
-    type: existing ? "plan_updated" : "plan_created",
-    title: existing ? "План обновлен администратором" : "План создан администратором",
-    summary: `Администратор назначил тимлида ${lead.name} и обновил план "${plan.title}". Дедлайн: ${plan.adjustedDeadline}. Шагов: ${plan.steps.length}.`
+    type: "plan_created",
+    title: "План создан администратором",
+    summary: `Администратор назначил тимлида ${lead.name} и создал план "${plan.title}". Дедлайн: ${plan.adjustedDeadline}. Шагов: ${plan.steps.length}.`
   });
 
   const serialized = serializePlan(plan);

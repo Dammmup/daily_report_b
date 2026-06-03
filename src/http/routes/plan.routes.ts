@@ -56,8 +56,7 @@ planRouter.post("/department-plan", auth, requireRole("lead"), async (req: Authe
   }
 
   const category = req.user!.category as Category;
-  const existing = await PlanModel.findOne(activePlanQuery(category)).sort({ createdAt: -1 });
-  const startDate = existing?.startDate || todayIso();
+  const startDate = todayIso();
   const steps = await decomposeProjectPlan({
     title: body.data.title,
     milestones: body.data.milestones,
@@ -70,20 +69,18 @@ planRouter.post("/department-plan", auth, requireRole("lead"), async (req: Authe
       leadId: req.user!._id,
       title: body.data.title,
       category,
-      version: existing?.version || (await PlanModel.countDocuments({ category })) + 1,
+      version: (await PlanModel.countDocuments({ category })) + 1,
       status: "approved" as const,
       startDate,
       baseDeadline: body.data.baseDeadline,
-      adjustedDeadline: existing?.adjustedDeadline || body.data.baseDeadline,
+      adjustedDeadline: body.data.baseDeadline,
       milestones: body.data.milestones,
       steps,
-      issues: existing?.issues || [],
+      issues: [],
       aiRationale: "AI разложил утвержденный план на шаги. Блокеры из дэйликов стажеров могут продлить дедлайн."
     };
 
-  const plan = existing
-    ? await PlanModel.findByIdAndUpdate(existing._id, payload, { returnDocument: "after" })
-    : await PlanModel.create(payload);
+  const plan = await PlanModel.create(payload);
 
   if (!plan) {
     res.status(500).json({ message: "Не удалось сохранить план" });
@@ -94,18 +91,18 @@ planRouter.post("/department-plan", auth, requireRole("lead"), async (req: Authe
     planId: plan.id,
     category,
     actorId: req.user!.id,
-    type: existing ? "plan_updated" : "plan_created",
-    title: existing ? "План обновлен" : "План создан",
-    summary: `Тимлид обновил план "${plan.title}". Текущий дедлайн: ${plan.adjustedDeadline}. Шагов в плане: ${plan.steps.length}.`
+    type: "plan_created",
+    title: "План создан",
+    summary: `Тимлид создал план "${plan.title}". Текущий дедлайн: ${plan.adjustedDeadline}. Шагов в плане: ${plan.steps.length}.`
   });
 
   await AuditLogModel.create({
     actorId: req.user!._id,
-    action: existing ? "plan_updated" : "plan_created",
+    action: "plan_created",
     entityType: "plan",
     entityId: plan.id,
     category,
-    message: `${existing ? "Обновлен" : "Создан"} план "${plan.title}"`
+    message: `Создан план "${plan.title}"`
   });
 
   res.status(201).json(serializePlan(plan));
