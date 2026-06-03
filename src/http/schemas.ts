@@ -153,6 +153,17 @@ export const assistantPlanFitSchema = z.object({
   planId: z.string().optional()
 });
 
+export const assignmentApplySchema = z.object({
+  assignments: z
+    .array(
+      z.object({
+        stepId: z.string().min(1),
+        userId: z.string().min(1)
+      })
+    )
+    .min(1)
+});
+
 export const profileUpdateSchema = z.object({
   name: z.string().min(2).max(120),
   avatarColor: z.string().min(4).max(32).optional(),

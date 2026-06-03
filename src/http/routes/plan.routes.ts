@@ -5,8 +5,9 @@ import { categories, todayIso } from "../../constants.js";
 import { AuditLogModel, PlanModel, StepArtifactModel, StepCommentModel, UserModel } from "../../models.js";
 import { notifyDepartmentPlanChange } from "../../telegram.js";
 import type { Category } from "../../types.js";
+import { buildAssignmentDraft } from "../../services.js";
 import { auth, requireRole, type AuthedRequest } from "../middleware/auth.js";
-import { planSchema, planStepCreateSchema, planStepUpdateSchema, stepArtifactSchema, stepCommentSchema } from "../schemas.js";
+import { assignmentApplySchema, planSchema, planStepCreateSchema, planStepUpdateSchema, stepArtifactSchema, stepCommentSchema } from "../schemas.js";
 import { publicUser, serializePlan } from "../serializers.js";
 
 export const planRouter = Router();
@@ -22,6 +23,12 @@ async function notifyPlanChangeSafely(input: Parameters<typeof notifyDepartmentP
   } catch (error) {
     console.error("Plan saved, but Telegram plan notification failed", error);
   }
+}
+
+async function findManageablePlan(req: AuthedRequest, planId: string) {
+  if (req.user!.role === "admin") return PlanModel.findById(planId);
+  if (!req.user!.category) return null;
+  return PlanModel.findOne({ _id: planId, category: req.user!.category });
 }
 
 planRouter.get("/my-plan", auth, async (req: AuthedRequest, res) => {
@@ -138,6 +145,117 @@ planRouter.post("/department-plan/:planId/complete", auth, requireRole("lead"), 
   });
 
   res.json(serializePlan(plan));
+});
+
+planRouter.post("/department-plan/:planId/assignment-draft", auth, requireRole("lead", "admin"), async (req: AuthedRequest, res) => {
+  const draft = await buildAssignmentDraft({
+    requester: req.user!,
+    planId: String(req.params.planId)
+  });
+
+  if (!draft.plan) {
+    res.status(404).json({ message: "План не найден или недоступен" });
+    return;
+  }
+
+  res.json(draft);
+});
+
+planRouter.post("/department-plan/:planId/assignments/apply", auth, requireRole("lead", "admin"), async (req: AuthedRequest, res) => {
+  const body = assignmentApplySchema.safeParse(req.body);
+  if (!body.success) {
+    res.status(400).json({ message: "Некорректный список назначений" });
+    return;
+  }
+
+  const plan = await findManageablePlan(req, String(req.params.planId));
+  if (!plan) {
+    res.status(404).json({ message: "План не найден или недоступен" });
+    return;
+  }
+
+  if (plan.status === "completed" || plan.status === "archived") {
+    res.status(400).json({ message: "Нельзя назначать шаги в завершенном или архивном плане" });
+    return;
+  }
+
+  const uniqueAssignments = Array.from(
+    new Map(body.data.assignments.map((assignment) => [assignment.stepId, assignment])).values()
+  );
+  const assignees = await UserModel.find({
+    _id: { $in: uniqueAssignments.map((assignment) => assignment.userId) },
+    role: "intern",
+    category: plan.category
+  });
+  const assigneeById = new Map(assignees.map((user) => [user.id, user]));
+
+  const applied: { stepId: string; stepTitle: string; userId: string; userName: string }[] = [];
+  const skipped: { stepId: string; reason: string }[] = [];
+
+  for (const assignment of uniqueAssignments) {
+    const step = plan.steps.id(assignment.stepId);
+    if (!step) {
+      skipped.push({ stepId: assignment.stepId, reason: "Шаг не найден" });
+      continue;
+    }
+    if (step.status === "done" || step.status === "canceled") {
+      skipped.push({ stepId: assignment.stepId, reason: "Шаг уже закрыт" });
+      continue;
+    }
+    if (step.assignedTo) {
+      skipped.push({ stepId: assignment.stepId, reason: "Шаг уже назначен" });
+      continue;
+    }
+
+    const assignee = assigneeById.get(assignment.userId);
+    if (!assignee) {
+      skipped.push({ stepId: assignment.stepId, reason: "Стажер не найден в департаменте плана" });
+      continue;
+    }
+
+    step.assignedTo = new Types.ObjectId(assignee.id);
+    applied.push({
+      stepId: step._id.toString(),
+      stepTitle: step.title,
+      userId: assignee.id,
+      userName: assignee.name
+    });
+  }
+
+  if (!applied.length) {
+    res.status(400).json({ message: "Нет назначений, которые можно применить", skipped });
+    return;
+  }
+
+  await plan.save();
+
+  await notifyPlanChangeSafely({
+    planId: plan.id,
+    category: plan.category as Category,
+    actorId: req.user!.id,
+    type: "step_assigned",
+    title: "AI распределил шаги плана",
+    summary: `AI-PM предложил и ${req.user!.role === "admin" ? "администратор" : "тимлид"} подтвердил назначения: ${applied
+      .map((item) => `${item.stepTitle} -> ${item.userName}`)
+      .join("; ")}.`,
+    stepId: applied[0]?.stepId
+  });
+
+  await AuditLogModel.create({
+    actorId: req.user!._id,
+    action: "ai_assignments_applied",
+    entityType: "plan",
+    entityId: plan.id,
+    category: plan.category,
+    message: `AI-распределение применено для плана "${plan.title}"`,
+    meta: { applied, skipped }
+  });
+
+  res.json({
+    plan: serializePlan(plan),
+    applied,
+    skipped
+  });
 });
 
 planRouter.post("/department-plan/steps", auth, requireRole("lead"), async (req: AuthedRequest, res) => {

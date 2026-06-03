@@ -148,6 +148,38 @@ export type PlanFitCandidate = {
   reportsCount: number;
 };
 
+export type AssignmentDraftItem = {
+  stepId: string;
+  stepTitle: string;
+  stepDescription: string;
+  deadline: string;
+  recommendedUser: User;
+  score: number;
+  confidence: "low" | "medium" | "high";
+  source: "same_department" | "other_department";
+  assignable: boolean;
+  reason: string;
+  risks: string[];
+  alternatives: PlanFitCandidate[];
+};
+
+export type AssignmentDraft = {
+  plan: {
+    id: string;
+    title: string;
+    category: Category;
+    categoryLabel: string;
+    adjustedDeadline: string;
+  } | null;
+  summary: string;
+  items: AssignmentDraftItem[];
+  skippedSteps: {
+    stepId: string;
+    title: string;
+    reason: string;
+  }[];
+};
+
 export type DecisionCenter = {
   scope: "department" | "all";
   plan?: {

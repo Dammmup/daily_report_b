@@ -11,4 +11,7 @@ const stepArtifactSchema = new Schema(
   { timestamps: true }
 );
 
+stepArtifactSchema.index({ stepId: 1, createdAt: -1 });
+stepArtifactSchema.index({ planId: 1, stepId: 1 });
+
 export const StepArtifactModel = mongoose.model("StepArtifact", stepArtifactSchema);

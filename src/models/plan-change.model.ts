@@ -24,4 +24,7 @@ const planChangeSchema = new Schema(
   { timestamps: true }
 );
 
+planChangeSchema.index({ category: 1, createdAt: -1 });
+planChangeSchema.index({ planId: 1, createdAt: -1 });
+
 export const PlanChangeModel = mongoose.model("PlanChange", planChangeSchema);

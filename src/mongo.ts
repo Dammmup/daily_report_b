@@ -208,6 +208,8 @@ async function mergeTelegramShadowUsers() {
 
 async function dropLegacyPlanCategoryUniqueIndex() {
   try {
+    const index = (await PlanModel.collection.indexes()).find((item) => item.name === "category_1");
+    if (!index?.unique) return;
     await PlanModel.collection.dropIndex("category_1");
     console.log("MongoDB migrated: dropped legacy unique plan category index.");
   } catch {
@@ -217,6 +219,8 @@ async function dropLegacyPlanCategoryUniqueIndex() {
 
 async function dropLegacyPlanUserIdUniqueIndex() {
   try {
+    const index = (await PlanModel.collection.indexes()).find((item) => item.name === "userId_1");
+    if (!index?.unique) return;
     await PlanModel.collection.dropIndex("userId_1");
     console.log("MongoDB migrated: dropped legacy unique plan userId index.");
   } catch {

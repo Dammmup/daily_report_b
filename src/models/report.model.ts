@@ -16,5 +16,9 @@ const reportSchema = new Schema(
   { timestamps: true }
 );
 
+reportSchema.index({ userId: 1, createdAt: -1 });
+reportSchema.index({ userId: 1, date: -1 });
+reportSchema.index({ date: 1, userId: 1 });
+
 export const ReportModel = mongoose.model("Report", reportSchema);
 export type ReportDocument = HydratedDocument<InferSchemaType<typeof reportSchema>>;

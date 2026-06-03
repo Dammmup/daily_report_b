@@ -10,4 +10,7 @@ const telegramActivitySchema = new Schema(
   { timestamps: true }
 );
 
+telegramActivitySchema.index({ userId: 1, messageAt: -1 });
+telegramActivitySchema.index({ chatId: 1, messageAt: -1 });
+
 export const TelegramActivityModel = mongoose.model("TelegramActivity", telegramActivitySchema);

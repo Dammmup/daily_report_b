@@ -42,5 +42,12 @@ const userSchema = new Schema(
   { timestamps: true }
 );
 
+userSchema.index({ role: 1, category: 1, name: 1 });
+userSchema.index({ role: 1, category: 1, telegramActivityScore: -1 });
+userSchema.index({ telegramChatId: 1 }, { sparse: true });
+userSchema.index({ telegramLinkToken: 1, telegramLinkTokenExpiresAt: 1 }, { sparse: true });
+userSchema.index({ category: 1, telegramDigestEnabled: 1, telegramDigestTime: 1 });
+userSchema.index({ category: 1, telegramReportReminderLastSentAt: 1 });
+
 export const UserModel = mongoose.model("User", userSchema);
 export type UserDocument = HydratedDocument<InferSchemaType<typeof userSchema>>;

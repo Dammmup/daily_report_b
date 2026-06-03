@@ -2,7 +2,7 @@ import type { Types } from "mongoose";
 import { askGroqAssistant, reviewReport } from "./ai.js";
 import { addDays, categories, todayIso } from "./constants.js";
 import { AttendanceModel, PlanModel, ReportModel, SurveyModel, UserModel, type UserDocument } from "./models.js";
-import type { Category, DecisionCenter, PlanFitCandidate } from "./types.js";
+import type { AssignmentDraft, Category, DecisionCenter, PlanFitCandidate } from "./types.js";
 
 const activePlanFilter = { status: { $in: ["draft", "approved"] as const } } as any;
 
@@ -68,13 +68,15 @@ export async function createDailyReport(input: {
 
   const aiReview = await reviewReport(input);
   const now = new Date();
-  const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
+  const plans = await PlanModel.find({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
   const linkedStepIds =
-    user.role === "intern" && plan
-      ? (input.linkedStepIds || []).filter((stepId) => {
-          const step = plan.steps.id(stepId);
-          return Boolean(step && step.assignedTo?.toString() === user.id);
-        })
+    user.role === "intern" && plans.length
+      ? (input.linkedStepIds || []).filter((stepId) =>
+          plans.some((plan) => {
+            const step = plan.steps.id(stepId);
+            return Boolean(step && step.assignedTo?.toString() === user.id);
+          })
+        )
       : [];
 
   const report = await ReportModel.create({
@@ -89,31 +91,54 @@ export async function createDailyReport(input: {
     aiReview
   });
 
-  if (user.role === "intern" && plan && aiReview.deadlineImpactDays > 0) {
-    plan.adjustedDeadline = addDays(plan.adjustedDeadline, aiReview.deadlineImpactDays);
-    plan.aiRationale = `AI продлил срок на ${aiReview.deadlineImpactDays} дн. из-за блокера в дэйлике стажера.`;
-    await plan.save();
+  if (user.role === "intern" && plans.length && aiReview.deadlineImpactDays > 0) {
+    const affectedPlanIds = new Set(
+      linkedStepIds.flatMap((stepId) => plans.filter((plan) => plan.steps.id(stepId)).map((plan) => plan.id))
+    );
+    const plansToExtend = affectedPlanIds.size ? plans.filter((plan) => affectedPlanIds.has(plan.id)) : plans.slice(0, 1);
+    await Promise.all(
+      plansToExtend.map(async (plan) => {
+        plan.adjustedDeadline = addDays(plan.adjustedDeadline, aiReview.deadlineImpactDays);
+        plan.aiRationale = `AI продлил срок на ${aiReview.deadlineImpactDays} дн. из-за блокера в дэйлике стажера.`;
+        await plan.save();
+      })
+    );
   }
 
   return report;
 }
 
 export async function buildDashboard(category?: Category) {
-  const [users, attendance, reports, surveys, plans] = await Promise.all([
-    UserModel.find().sort({ name: 1 }),
-    AttendanceModel.find(),
-    ReportModel.find().sort({ createdAt: -1 }),
-    SurveyModel.find(),
-    PlanModel.find()
+  const interns = await UserModel.find({ role: "intern", ...(category ? { category } : {}) }).sort({ name: 1 });
+  const internIds = new Set(interns.map((user) => user.id));
+  const internObjectIds = interns.map((user) => user._id);
+  const [attendance, scopedReports, surveys, plans] = await Promise.all([
+    internObjectIds.length ? AttendanceModel.find({ userId: { $in: internObjectIds } }) : [],
+    internObjectIds.length ? ReportModel.find({ userId: { $in: internObjectIds } }).sort({ createdAt: -1 }) : [],
+    internObjectIds.length ? SurveyModel.find({ userId: { $in: internObjectIds } }) : [],
+    PlanModel.find({ ...(category ? { category } : {}), ...activePlanFilter }).sort({ createdAt: -1 })
   ]);
 
-  const interns = users.filter((user) => user.role === "intern" && (!category || user.category === category));
-  const internIds = new Set(interns.map((user) => user.id));
-  const scopedReports = reports.filter((report) => internIds.has(report.userId.toString()));
   const reportScores = scopedReports
     .map((report) => report.aiReview?.productivityScore)
     .filter((score): score is number => typeof score === "number");
   const averageScore = reportScores.length ? Math.round(reportScores.reduce((sum, score) => sum + score, 0) / reportScores.length) : 0;
+  const reportsByUser = new Map<string, typeof scopedReports>();
+  const attendanceByUser = new Map<string, typeof attendance>();
+  const surveyByUser = new Map(surveys.map((survey) => [survey.userId.toString(), survey]));
+  const plansByCategory = new Map<string, typeof plans>();
+
+  for (const report of scopedReports) {
+    const key = report.userId.toString();
+    reportsByUser.set(key, [...(reportsByUser.get(key) || []), report]);
+  }
+  for (const item of attendance) {
+    const key = item.userId.toString();
+    attendanceByUser.set(key, [...(attendanceByUser.get(key) || []), item]);
+  }
+  for (const plan of plans) {
+    plansByCategory.set(plan.category, [...(plansByCategory.get(plan.category) || []), plan]);
+  }
 
   const byCategory = Object.entries(categories)
     .filter(([key]) => !category || key === category)
@@ -133,29 +158,36 @@ export async function buildDashboard(category?: Category) {
     });
 
   const internRows = interns.map((user) => {
-    const userReports = scopedReports.filter((report) => report.userId.toString() === user.id);
+    const userReports = reportsByUser.get(user.id) || [];
     const scores = userReports.map((report) => report.aiReview?.productivityScore || 0);
-    const survey = surveys.find((item) => item.userId.toString() === user.id);
-    const plan = plans
-      .filter((item) => item.category === user.category && ["draft", "approved"].includes(item.status))
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
-    const userAttendance = attendance.filter((item) => item.userId.toString() === user.id);
+    const survey = surveyByUser.get(user.id);
+    const userPlans = user.category ? plansByCategory.get(user.category) || [] : [];
+    const plan = userPlans[0];
+    const userAttendance = attendanceByUser.get(user.id) || [];
     const officeAttendanceCount = userAttendance.filter((item) => item.locationStatus === "verified").length;
+    const currentWeekOfficeDays = new Set(
+      userAttendance
+        .filter((item) => item.locationStatus === "verified" && item.date >= todayIso().slice(0, 8) + "01")
+        .map((item) => item.date)
+    ).size;
 
     return {
       ...publicUser(user),
       attendanceCount: userAttendance.length,
       officeAttendanceCount,
+      currentWeekOfficeDays,
       reportsCount: userReports.length,
       averageScore: scores.length ? Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length) : 0,
-      activeToday: attendance.some((item) => item.userId.toString() === user.id && item.date === todayIso()),
+      activeToday: userAttendance.some((item) => item.date === todayIso()),
       survey,
       plan,
-      assignedOpenSteps: plan?.steps.filter((step) => step.assignedTo?.toString() === user.id && step.status !== "done" && step.status !== "canceled").length || 0
+      assignedOpenSteps: userPlans.reduce(
+        (sum, item) =>
+          sum + item.steps.filter((step) => step.assignedTo?.toString() === user.id && step.status !== "done" && step.status !== "canceled").length,
+        0
+      )
     };
   });
-
-  const activePlans = plans.filter((plan) => ["draft", "approved"].includes(plan.status) && (!category || plan.category === category));
 
   return {
     stats: {
@@ -165,7 +197,7 @@ export async function buildDashboard(category?: Category) {
       aiReviewedReports: scopedReports.filter((report) => report.aiReview).length,
       averageScore,
       byCategory,
-      plans: activePlans.map((plan) => ({
+      plans: plans.map((plan) => ({
         id: plan.id,
         title: plan.title,
         category: plan.category,
@@ -218,22 +250,29 @@ export async function buildInternAiProfile(userId: string) {
   };
 }
 
-export async function buildAiSummary(category?: Category) {
-  const dashboard = await buildDashboard(category);
-  const profiles = await Promise.all(dashboard.interns.map((intern) => buildInternAiProfile(intern.id)));
+export async function buildAiSummary(category?: Category, preloadedDashboard?: Awaited<ReturnType<typeof buildDashboard>>) {
+  const dashboard = preloadedDashboard || await buildDashboard(category);
 
-  const interns = profiles
-    .filter((profile): profile is NonNullable<typeof profile> => Boolean(profile))
-    .filter((profile) => !category || profile.user.category === category)
-    .map((profile) => {
-      const latestReport = profile.reports[0];
+  const interns = dashboard.interns
+    .filter((intern) => !category || intern.category === category)
+    .map((intern) => {
+      const latestReport = dashboard.reports.find((report) => report.userId.toString() === intern.id);
       return {
-        user: profile.user,
-        stats: profile.stats,
-        surveyAnalysis: profile.survey?.analysis,
+        user: intern,
+        stats: {
+          reportsCount: intern.reportsCount,
+          aiReviewedReports: dashboard.reports.filter((report) => report.userId.toString() === intern.id && report.aiReview).length,
+          averageScore: intern.averageScore,
+          attendanceCount: intern.attendanceCount,
+          officeAttendanceCount: intern.officeAttendanceCount,
+          currentWeekOfficeDays: intern.currentWeekOfficeDays,
+          blockerReports: dashboard.reports.filter((report) => report.userId.toString() === intern.id && report.blockers.trim().length > 0).length,
+          lastReportAt: latestReport?.createdAt?.toISOString()
+        },
+        surveyAnalysis: intern.survey?.analysis,
         latestReportAi: latestReport?.aiReview,
         latestReportDate: latestReport?.date,
-        plan: profile.plan
+        plan: intern.plan
       };
     });
 
@@ -254,7 +293,7 @@ export async function buildAiSummary(category?: Category) {
 
 export async function formatLeadSummary(category?: Category, content: "productivity" | "reports" | "full" = "full") {
   const dashboard = await buildDashboard(category);
-  const aiSummary = await buildAiSummary(category);
+  const aiSummary = await buildAiSummary(category, dashboard);
   const weak = dashboard.interns
     .filter((intern) => intern.averageScore > 0 && intern.averageScore < 65)
     .map((intern) => `${intern.name}: ${intern.averageScore}%`)
@@ -360,10 +399,224 @@ function scoreCandidate(planText: string, surveyText: string, averageScore: numb
   return Math.min(100, Math.round(overlaps * 12 + averageScore * 0.35 + (sameDepartment ? 18 : 0)));
 }
 
+function clampScore(value: number) {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function confidenceByScore(score: number): "low" | "medium" | "high" {
+  if (score >= 75) return "high";
+  if (score >= 55) return "medium";
+  return "low";
+}
+
+function openAssignedStepsForUser(plans: Awaited<ReturnType<typeof PlanModel.find>>, userId: string) {
+  return plans.reduce(
+    (sum, plan) =>
+      sum + (plan.steps || []).filter((step) => step.assignedTo?.toString() === userId && step.status !== "done" && step.status !== "canceled").length,
+    0
+  );
+}
+
+export async function buildAssignmentDraft(input: {
+  requester: UserDocument;
+  planId: string;
+}): Promise<AssignmentDraft> {
+  const plan =
+    input.requester.role === "admin"
+      ? await PlanModel.findById(input.planId)
+      : input.requester.category
+        ? await PlanModel.findOne({ _id: input.planId, category: input.requester.category })
+        : null;
+
+  if (!plan) {
+    return {
+      plan: null,
+      summary: "План не найден или недоступен для распределения.",
+      items: [],
+      skippedSteps: []
+    };
+  }
+
+  const targetSteps = (plan.steps || []).filter((step) => !step.assignedTo && step.status !== "done" && step.status !== "canceled");
+  const skippedSteps = (plan.steps || [])
+    .filter((step) => step.assignedTo || step.status === "done" || step.status === "canceled")
+    .map((step) => ({
+      stepId: step._id.toString(),
+      title: step.title,
+      reason: step.assignedTo ? "Шаг уже назначен" : step.status === "done" ? "Шаг уже завершен" : "Шаг отменен"
+    }));
+
+  if (!targetSteps.length) {
+    return {
+      plan: {
+        id: plan.id,
+        title: plan.title,
+        category: plan.category as Category,
+        categoryLabel: categories[plan.category as Category],
+        adjustedDeadline: plan.adjustedDeadline
+      },
+      summary: "Свободных шагов для AI-распределения нет. Все шаги уже назначены, завершены или отменены.",
+      items: [],
+      skippedSteps
+    };
+  }
+
+  const [interns, surveys, reports, attendance, activePlans] = await Promise.all([
+    UserModel.find({ role: "intern" }).sort({ name: 1 }),
+    SurveyModel.find().lean(),
+    ReportModel.find().sort({ createdAt: -1 }),
+    AttendanceModel.find().sort({ createdAt: -1 }),
+    PlanModel.find(activePlanFilter)
+  ]);
+
+  const surveyByUser = new Map(surveys.map((survey) => [survey.userId.toString(), survey]));
+  const reportsByUser = new Map<string, typeof reports>();
+  const attendanceByUser = new Map<string, typeof attendance>();
+  for (const report of reports) {
+    const key = report.userId.toString();
+    reportsByUser.set(key, [...(reportsByUser.get(key) || []), report]);
+  }
+  for (const item of attendance) {
+    const key = item.userId.toString();
+    attendanceByUser.set(key, [...(attendanceByUser.get(key) || []), item]);
+  }
+
+  const plannedLoad = new Map<string, number>();
+  const planContext = `${plan.title} ${plan.milestones.join(" ")} ${plan.aiRationale}`;
+
+  const candidateBase = interns.map((user) => {
+    const survey = surveyByUser.get(user.id);
+    const userReports = reportsByUser.get(user.id) || [];
+    const userAttendance = attendanceByUser.get(user.id) || [];
+    const scores = userReports.map((report) => report.aiReview?.productivityScore || 0);
+    const averageScore = scores.length ? Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length) : 0;
+    const blockerReports = userReports.filter((report) => report.blockers.trim()).length;
+    const officeDays = new Set(userAttendance.filter((item) => item.locationStatus === "verified").map((item) => item.date)).size;
+    const assignedOpen = openAssignedStepsForUser(activePlans, user.id);
+    const sameDepartment = user.category === plan.category;
+
+    return {
+      user,
+      survey,
+      surveyText: surveySearchText(survey),
+      averageScore,
+      reportsCount: userReports.length,
+      blockerReports,
+      officeDays,
+      assignedOpen,
+      sameDepartment
+    };
+  });
+
+  const items = targetSteps.flatMap((step) => {
+    const stepText = [planContext, step.title, step.description, step.technicalSpec, step.technicalInstruction].filter(Boolean).join(" ");
+    const ranked = candidateBase
+      .map((candidate) => {
+        const workload = candidate.assignedOpen + (plannedLoad.get(candidate.user.id) || 0);
+        const baseScore = scoreCandidate(stepText, candidate.surveyText, candidate.averageScore, candidate.sameDepartment);
+        const surveyBonus = candidate.survey ? 8 : -8;
+        const attendanceBonus = candidate.officeDays >= 2 ? 4 : 0;
+        const reportsBonus = candidate.reportsCount ? 4 : -6;
+        const blockerPenalty = Math.min(14, candidate.blockerReports * 4);
+        const workloadPenalty = Math.min(24, workload * 8);
+        const score = clampScore(baseScore + surveyBonus + attendanceBonus + reportsBonus - blockerPenalty - workloadPenalty);
+
+        const risks = [
+          candidate.sameDepartment ? "" : "Стажер из другого департамента: перед назначением нужен перевод или отдельное согласование.",
+          candidate.survey ? "" : "Нет заполненного AI-профиля из миниопроса.",
+          candidate.reportsCount ? "" : "Нет истории дэйликов, темп работы подтвержден слабо.",
+          candidate.blockerReports > 1 ? `Есть блокеры в дэйликах: ${candidate.blockerReports}` : "",
+          workload > 1 ? `Уже есть открытые задачи: ${workload}` : "",
+          candidate.officeDays ? "" : "Нет подтвержденных офисных отметок."
+        ].filter(Boolean);
+
+        const strengths = candidate.survey?.analysis?.strengths?.slice(0, 2).join(", ");
+        const skills = candidate.survey?.analysis?.skillsSummary;
+        const reason = [
+          strengths ? `Сильные стороны: ${strengths}.` : "Подбор сделан по продуктивности и доступным данным.",
+          skills ? `Навыки: ${skills}` : "",
+          `Средняя продуктивность: ${candidate.averageScore}%.`,
+          `Текущая нагрузка: ${workload} открытых задач.`
+        ]
+          .filter(Boolean)
+          .join(" ");
+
+        return {
+          user: candidate.user,
+          survey: candidate.survey,
+          score,
+          reason,
+          risks,
+          source: candidate.sameDepartment ? ("same_department" as const) : ("other_department" as const),
+          averageScore: candidate.averageScore,
+          reportsCount: candidate.reportsCount
+        };
+      })
+      .sort((left, right) => {
+        if (left.source !== right.source) return left.source === "same_department" ? -1 : 1;
+        return right.score - left.score;
+      });
+
+    const primary = ranked.find((candidate) => candidate.source === "same_department") || ranked[0];
+    if (!primary) return [];
+    plannedLoad.set(primary.user.id, (plannedLoad.get(primary.user.id) || 0) + 1);
+
+    const alternatives = ranked.slice(0, 4).map((candidate) => ({
+      user: publicUser(candidate.user),
+      score: candidate.score,
+      matchReason: candidate.reason,
+      risks: candidate.risks,
+      source: candidate.source,
+      surveyAnalysis: candidate.survey?.analysis,
+      averageScore: candidate.averageScore,
+      reportsCount: candidate.reportsCount
+    }));
+
+    return [{
+      stepId: step._id.toString(),
+      stepTitle: step.title,
+      stepDescription: step.description,
+      deadline: step.deadline,
+      recommendedUser: publicUser(primary.user),
+      score: primary.score,
+      confidence: confidenceByScore(primary.score),
+      source: primary.source,
+      assignable: primary.user.category === plan.category,
+      reason: primary.reason,
+      risks: primary.risks,
+      alternatives
+    }];
+  });
+
+  const assignable = items.filter((item) => item.assignable).length;
+  const summary = [
+    `AI-PM подготовил распределение: ${items.length} шагов.`,
+    assignable ? `Можно применить сразу: ${assignable}.` : "Автоматически применимых назначений нет.",
+    items.some((item) => !item.assignable) ? "Есть кандидаты из других департаментов: их нужно сначала перевести или согласовать вручную." : "",
+    skippedSteps.length ? `Пропущено уже занятых/закрытых шагов: ${skippedSteps.length}.` : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return {
+    plan: {
+      id: plan.id,
+      title: plan.title,
+      category: plan.category as Category,
+      categoryLabel: categories[plan.category as Category],
+      adjustedDeadline: plan.adjustedDeadline
+    },
+    summary,
+    items,
+    skippedSteps
+  };
+}
+
 export async function buildPlanFitAssistant(input: {
   requester: UserDocument;
   question: string;
   planId?: string;
+  skipAi?: boolean;
 }) {
   const plan =
     input.planId && input.requester.role === "admin"
@@ -381,11 +634,11 @@ export async function buildPlanFitAssistant(input: {
     };
   }
 
-  const [interns, surveys, reports] = await Promise.all([
+  const [interns, surveys] = await Promise.all([
     UserModel.find({ role: "intern" }).sort({ name: 1 }),
-    SurveyModel.find().lean(),
-    ReportModel.find().sort({ createdAt: -1 })
+    SurveyModel.find().lean()
   ]);
+  const reports = interns.length ? await ReportModel.find({ userId: { $in: interns.map((user) => user._id) } }).sort({ createdAt: -1 }) : [];
 
   const planText = `${plan.title} ${plan.milestones.join(" ")} ${plan.aiRationale}`;
   const rows = interns.map((user) => {
@@ -448,7 +701,9 @@ export async function buildPlanFitAssistant(input: {
     )
     .join("\n\n");
 
-  const aiAnswer = await askGroqAssistant(`
+  const aiAnswer = input.skipAi
+    ? ""
+    : await askGroqAssistant(`
 Вопрос тимлида/админа: ${input.question}
 
 План:
@@ -492,7 +747,7 @@ ${context || "Кандидатов нет"}
 
 export async function buildDecisionCenter(category?: Category): Promise<DecisionCenter> {
   const dashboard = await buildDashboard(category);
-  const aiSummary = await buildAiSummary(category);
+  const aiSummary = await buildAiSummary(category, dashboard);
   const plan = category
     ? await PlanModel.findOne({ category, ...activePlanFilter }).sort({ createdAt: -1 })
     : await PlanModel.findOne(activePlanFilter).sort({ updatedAt: -1 });
@@ -500,7 +755,8 @@ export async function buildDecisionCenter(category?: Category): Promise<Decision
     ? await buildPlanFitAssistant({
         requester: { role: "admin", category: undefined } as UserDocument,
         question: "Кого лучше поставить на текущий план проекта?",
-        planId: plan.id
+        planId: plan.id,
+        skipAi: true
       })
     : { candidates: [] as PlanFitCandidate[] };
 

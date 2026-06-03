@@ -20,4 +20,8 @@ const telegramGroupSchema = new Schema(
   { timestamps: true }
 );
 
+telegramGroupSchema.index({ category: 1, motivationEnabled: 1 });
+telegramGroupSchema.index({ category: 1, groupDigestLastSentAt: 1 });
+telegramGroupSchema.index({ category: 1, dailyReminderLastSentAt: 1 });
+
 export const TelegramGroupModel = mongoose.model("TelegramGroup", telegramGroupSchema);

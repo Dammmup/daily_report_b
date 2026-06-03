@@ -10,4 +10,7 @@ const stepCommentSchema = new Schema(
   { timestamps: true }
 );
 
+stepCommentSchema.index({ stepId: 1, createdAt: 1 });
+stepCommentSchema.index({ planId: 1, stepId: 1 });
+
 export const StepCommentModel = mongoose.model("StepComment", stepCommentSchema);
