@@ -82,7 +82,7 @@ planRouter.post("/department-plan", auth, requireRole("lead"), async (req: Authe
     };
 
   const plan = existing
-    ? await PlanModel.findByIdAndUpdate(existing._id, payload, { new: true })
+    ? await PlanModel.findByIdAndUpdate(existing._id, payload, { returnDocument: "after" })
     : await PlanModel.create(payload);
 
   if (!plan) {

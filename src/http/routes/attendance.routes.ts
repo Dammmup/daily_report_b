@@ -105,7 +105,7 @@ attendanceRouter.put("/office-location", auth, async (req: AuthedRequest, res) =
       minWeeklyOfficeDays: body.data.minWeeklyOfficeDays,
       updatedBy: req.user!._id
     },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: "after" }
   );
 
   res.json(serializeOfficeLocation(location));
@@ -156,7 +156,7 @@ attendanceRouter.post("/check-in", auth, async (req: AuthedRequest, res) => {
       },
       $setOnInsert: { checkInAt: new Date() }
     },
-    { new: true, upsert: true }
+    { returnDocument: "after", upsert: true }
   );
 
   res.status(201).json(serializeAttendance(attendance));

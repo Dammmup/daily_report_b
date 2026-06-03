@@ -9,6 +9,7 @@ import type { Category } from "./types.js";
 type DigestContent = "productivity" | "reports" | "full";
 
 let botInstance: Telegraf | undefined;
+let pollingStarted = false;
 let digestTimer: NodeJS.Timeout | undefined;
 const temporaryGroupMessageTtlMs = Number(process.env.TELEGRAM_TEMP_MESSAGE_TTL_MS || 5000);
 const activePlanFilter = { status: { $in: ["draft", "approved"] as const } } as any;
@@ -374,7 +375,7 @@ async function trackGroupText(ctx: Context, text: string) {
       category,
       lastActivityAt: now
     },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: "after" }
   );
 
   let user = await UserModel.findOne({ telegramUserId });
@@ -453,7 +454,7 @@ async function trackNewGroupMembers(ctx: Context) {
       ...(category ? { category } : {}),
       lastActivityAt: new Date()
     },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: "after" }
   );
 
   let created = 0;
@@ -523,7 +524,7 @@ async function applyGroupDepartment(ctx: Context, category: Category) {
       category,
       lastActivityAt: new Date()
     },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: "after" }
   );
 
   await replyTemporary(ctx, `Группа привязана к департаменту: ${categories[category]}. Участников вижу: ${group.membersSeen}.`, groupActionsKeyboard(group.motivationEnabled));
@@ -554,7 +555,7 @@ async function setGroupDepartment(ctx: Context) {
       category,
       lastActivityAt: new Date()
     },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: "after" }
   );
 
   await replyTemporary(ctx, `Группа привязана к департаменту: ${categories[category]}. Участников вижу: ${group.membersSeen}.`);
@@ -609,7 +610,7 @@ async function setGroupMotivation(ctx: Context, enabled: boolean) {
       ...(category ? { category } : {}),
       motivationEnabled: enabled
     },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: "after" }
   );
 
   await replyTemporary(ctx, `Будничная мотивация ${group.motivationEnabled ? "включена" : "выключена"}.`);
@@ -723,7 +724,7 @@ export async function notifyDepartmentPlanChange(input: {
   const recipients = await UserModel.find({
     role: "intern",
     category: input.category,
-    telegramChatId: { $exists: true, $ne: "" }
+    telegramChatId: { $type: "string", $ne: "" }
   });
 
   const change = await PlanChangeModel.create({
@@ -754,7 +755,8 @@ export async function notifyDepartmentPlanChange(input: {
 
   for (const user of recipients) {
     try {
-      await bot.telegram.sendMessage(user.telegramChatId!, message, buttons);
+      if (!user.telegramChatId?.trim()) continue;
+      await bot.telegram.sendMessage(user.telegramChatId, message, buttons);
     } catch (error) {
       console.error("Telegram plan change notification error", error);
     }
@@ -952,7 +954,7 @@ async function startDailyWizard(ctx: Context) {
       blockers: "",
       expiresAt: new Date(Date.now() + 1000 * 60 * 30)
     },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: "after" }
   );
   await ctx.reply("Начинаем дэйлик. Что сделали вчера? Напишите одним сообщением.");
 }
@@ -974,7 +976,7 @@ async function startBlockerWizard(ctx: Context, stepId?: string) {
       blockers: "",
       expiresAt: new Date(Date.now() + 1000 * 60 * 30)
     },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: "after" }
   );
   await ctx.reply("Опишите блокер одним сообщением. Я сохраню его как дэйлик с пометкой о проблеме.");
 }
@@ -1231,7 +1233,7 @@ function startDigestScheduler(bot: Telegraf) {
     const dayKey = now.toISOString().slice(0, 10);
     const leads = await UserModel.find({
       role: "lead",
-      telegramChatId: { $exists: true },
+      telegramChatId: { $type: "string", $ne: "" },
       telegramDigestEnabled: true,
       telegramDigestTime: currentTime
     });
@@ -1594,8 +1596,21 @@ export function startTelegramBot() {
     return;
   }
 
-  bot.launch().catch((err) => console.error("Telegram bot launch error:", err));
-  console.log("Telegram bot started in polling mode.");
+  if (pollingStarted) return;
+  pollingStarted = true;
+
+  bot
+    .launch()
+    .then(() => console.log("Telegram bot started in polling mode."))
+    .catch((err) => {
+      pollingStarted = false;
+      const errorCode = (err as { response?: { error_code?: number } })?.response?.error_code;
+      if (errorCode === 409) {
+        console.warn("Telegram bot polling skipped: another bot instance is already running getUpdates. Stop the other backend process or use TELEGRAM_BOT_MODE=webhook.");
+        return;
+      }
+      console.error("Telegram bot launch error:", err);
+    });
 
   process.once("SIGINT", () => bot.stop("SIGINT"));
   process.once("SIGTERM", () => bot.stop("SIGTERM"));

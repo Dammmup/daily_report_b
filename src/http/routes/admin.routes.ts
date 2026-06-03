@@ -174,7 +174,7 @@ adminRouter.post("/admin/plans", auth, requireRole("admin"), async (req: AuthedR
   };
 
   const plan = existing
-    ? await PlanModel.findByIdAndUpdate(existing._id, payload, { new: true })
+    ? await PlanModel.findByIdAndUpdate(existing._id, payload, { returnDocument: "after" })
     : await PlanModel.create(payload);
 
   if (!plan) {

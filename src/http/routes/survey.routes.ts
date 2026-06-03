@@ -17,7 +17,7 @@ surveyRouter.post("/survey", auth, async (req: AuthedRequest, res) => {
   const survey = await SurveyModel.findOneAndUpdate(
     { userId: req.user!._id },
     { answers: body.data, analysis },
-    { new: true, upsert: true }
+    { returnDocument: "after", upsert: true }
   );
 
   req.user!.firstLoginCompleted = true;
