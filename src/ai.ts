@@ -66,6 +66,110 @@ export async function askGroqAssistant(prompt: string) {
   return data.choices?.[0]?.message?.content;
 }
 
+function normalizeResourceFit(value: Partial<{
+  matchScore: number;
+  riskLevel: "low" | "medium" | "high";
+  summary: string;
+  matchedSteps: string[];
+  missingRequirements: string[];
+  suggestedActions: string[];
+}>) {
+  const score = Math.max(0, Math.min(100, Number(value.matchScore || 0)));
+  return {
+    matchScore: score,
+    riskLevel: value.riskLevel || (score >= 75 ? "low" : score >= 50 ? "medium" : "high"),
+    summary: value.summary || "AI не вернул подробную сводку по внешнему ресурсу.",
+    matchedSteps: Array.isArray(value.matchedSteps) ? value.matchedSteps.slice(0, 8) : [],
+    missingRequirements: Array.isArray(value.missingRequirements) ? value.missingRequirements.slice(0, 8) : [],
+    suggestedActions: Array.isArray(value.suggestedActions) ? value.suggestedActions.slice(0, 8) : []
+  };
+}
+
+function keywordScore(left: string, right: string) {
+  const words = (value: string) =>
+    new Set(
+      value
+        .toLowerCase()
+        .split(/[^a-zа-я0-9+#]+/i)
+        .filter((word) => word.length > 3)
+    );
+  const planWords = words(left);
+  const resourceWords = words(right);
+  if (!planWords.size || !resourceWords.size) return 0;
+  const matches = [...resourceWords].filter((word) => planWords.has(word)).length;
+  return Math.max(10, Math.min(82, Math.round((matches / Math.max(resourceWords.size, 1)) * 100)));
+}
+
+export async function analyzeExternalResourceFit(input: {
+  planTitle: string;
+  categoryLabel: string;
+  milestones: string[];
+  steps: { title: string; description?: string; deadline?: string }[];
+  resourceTitle: string;
+  provider: string;
+  resourceType: string;
+  externalUrl: string;
+  contentSummary?: string;
+}) {
+  const planText = [
+    input.planTitle,
+    input.categoryLabel,
+    input.milestones.join(" "),
+    input.steps.map((step) => `${step.title} ${step.description || ""} ${step.deadline || ""}`).join(" ")
+  ].join(" ");
+  const resourceText = [input.resourceTitle, input.provider, input.resourceType, input.externalUrl, input.contentSummary || ""].join(" ");
+  const fallbackScore = keywordScore(planText, resourceText);
+  const fallback = normalizeResourceFit({
+    matchScore: fallbackScore,
+    riskLevel: fallbackScore >= 70 ? "low" : fallbackScore >= 45 ? "medium" : "high",
+    summary:
+      fallbackScore >= 70
+        ? "Внешний ресурс выглядит связанным с планом по названию, описанию и ключевым словам."
+        : "Связь внешнего ресурса с планом пока слабая. Добавьте описание ресурса или прикрепите более точный документ.",
+    matchedSteps: input.steps
+      .filter((step) => keywordScore(`${step.title} ${step.description || ""}`, resourceText) >= 35)
+      .map((step) => step.title)
+      .slice(0, 5),
+    missingRequirements: fallbackScore >= 70 ? [] : ["Недостаточно содержательного описания внешнего ресурса для уверенной проверки."],
+    suggestedActions: fallbackScore >= 70 ? ["Привязать ресурс к подходящему шагу и использовать как ТЗ/материал."] : ["Добавить краткое содержание документа или проверить права доступа."]
+  });
+
+  const aiText = await callGroq(`
+Сравни внешний ресурс с планом проекта mini ERP.
+Верни только JSON:
+{
+  "matchScore": number от 0 до 100,
+  "riskLevel": "low" | "medium" | "high",
+  "summary": "краткий вывод",
+  "matchedSteps": ["какие шаги плана покрывает ресурс"],
+  "missingRequirements": ["чего не хватает в ресурсе относительно плана"],
+  "suggestedActions": ["что сделать тимлиду"]
+}
+
+План: ${input.planTitle}
+Департамент: ${input.categoryLabel}
+Этапы: ${input.milestones.join("; ")}
+Шаги:
+${input.steps.map((step, index) => `${index + 1}. ${step.title}. ${step.description || ""} Дедлайн: ${step.deadline || "не указан"}`).join("\n")}
+
+Внешний ресурс:
+Провайдер: ${input.provider}
+Тип: ${input.resourceType}
+Название: ${input.resourceTitle}
+Ссылка: ${input.externalUrl}
+Описание/выжимка: ${input.contentSummary || "не указано"}
+`);
+
+  if (!aiText) return { ...fallback, rawResponse: "" };
+  const parsed = extractJson(aiText);
+  if (!parsed) return { ...fallback, rawResponse: aiText };
+  try {
+    return { ...normalizeResourceFit(JSON.parse(parsed)), rawResponse: aiText };
+  } catch {
+    return { ...fallback, rawResponse: aiText };
+  }
+}
+
 export async function transcribeAudio(input: { buffer: ArrayBuffer; filename: string; mimeType?: string }) {
   if (!process.env.GROQ_API_KEY) return undefined;
 

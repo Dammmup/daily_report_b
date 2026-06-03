@@ -185,6 +185,30 @@ export const stepArtifactSchema = z.object({
   url: z.string().url()
 });
 
+export const externalResourceSchema = z.object({
+  provider: z.enum(["google_drive", "trello", "notion", "manual"]),
+  externalId: z.string().max(300).optional().or(z.literal("")),
+  externalUrl: z.string().url(),
+  title: z.string().min(2).max(220),
+  resourceType: z.enum(["folder", "document", "board", "card", "page", "database", "other"]),
+  linkedEntityType: z.enum(["department", "plan", "step"]),
+  linkedEntityId: z.string().min(1),
+  category: categorySchema.optional(),
+  contentSummary: z.string().max(5000).optional()
+});
+
+export const externalResourceAiCheckSchema = z.object({
+  planId: z.string().optional()
+});
+
+export const integrationManualConnectionSchema = z.object({
+  provider: z.enum(["trello"]),
+  accessToken: z.string().min(8),
+  externalAccountName: z.string().max(160).optional().or(z.literal("")),
+  externalAccountId: z.string().max(160).optional().or(z.literal("")),
+  category: categorySchema.optional()
+});
+
 export const reportUpdateSchema = z.object({
   yesterday: z.string().min(10),
   todayPlan: z.string().min(10),

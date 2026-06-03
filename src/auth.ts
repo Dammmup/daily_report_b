@@ -12,6 +12,28 @@ export function verifyToken(token: string) {
   return jwt.verify(token, jwtSecret) as { sub: string; role: string };
 }
 
+export function signOAuthState(input: {
+  provider: string;
+  userId: string;
+  category?: string;
+  redirectPath?: string;
+}) {
+  return jwt.sign(input, jwtSecret, { expiresIn: "10m" });
+}
+
+export function verifyOAuthState(token: string) {
+  try {
+    return jwt.verify(token, jwtSecret) as {
+      provider: string;
+      userId: string;
+      category?: string;
+      redirectPath?: string;
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function generateVerificationCode() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
