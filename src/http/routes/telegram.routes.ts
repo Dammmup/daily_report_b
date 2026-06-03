@@ -1,7 +1,15 @@
 import { Router } from "express";
+import type { Request, Response } from "express";
 import { signToken, verifyTelegramInitData } from "../../auth.js";
 import { UserModel } from "../../models.js";
-import { handleTelegramWebhook, sendWeekdayGroupMotivation } from "../../telegram.js";
+import {
+  handleTelegramWebhook,
+  sendTelegramProductivityAutomation,
+  sendWeekdayGroupDailyDigests,
+  sendWeekdayGroupMotivation,
+  sendWeekdayPersonalFocus,
+  sendWeekdayReportReminders
+} from "../../telegram.js";
 import { auth, requireRole, type AuthedRequest } from "../middleware/auth.js";
 import { telegramDigestSchema, telegramMiniAppSessionSchema } from "../schemas.js";
 import { publicUser } from "../serializers.js";
@@ -73,7 +81,7 @@ telegramRouter.post("/telegram/webhook", async (req, res, next) => {
   }
 });
 
-telegramRouter.post("/telegram/motivation-cron", async (req, res, next) => {
+telegramRouter.all("/telegram/motivation-cron", async (req, res, next) => {
   try {
     const secret = process.env.CRON_SECRET;
     const authHeader = req.header("authorization");
@@ -88,3 +96,51 @@ telegramRouter.post("/telegram/motivation-cron", async (req, res, next) => {
     next(error);
   }
 });
+
+telegramRouter.all("/telegram/productivity-cron", async (req, res, next) => {
+  try {
+    if (!authorizeCron(req, res)) return;
+
+    const result = await sendTelegramProductivityAutomation();
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    next(error);
+  }
+});
+
+telegramRouter.all("/telegram/personal-focus-cron", async (req, res, next) => {
+  try {
+    if (!authorizeCron(req, res)) return;
+    res.json({ ok: true, ...(await sendWeekdayPersonalFocus()) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+telegramRouter.all("/telegram/report-reminder-cron", async (req, res, next) => {
+  try {
+    if (!authorizeCron(req, res)) return;
+    res.json({ ok: true, ...(await sendWeekdayReportReminders()) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+telegramRouter.all("/telegram/group-digest-cron", async (req, res, next) => {
+  try {
+    if (!authorizeCron(req, res)) return;
+    res.json({ ok: true, ...(await sendWeekdayGroupDailyDigests()) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+function authorizeCron(req: Request, res: Response) {
+  const secret = process.env.CRON_SECRET;
+  const authHeader = req.header("authorization");
+  if (secret && authHeader !== `Bearer ${secret}` && req.header("x-cron-secret") !== secret && req.query.secret !== secret) {
+    res.status(401).json({ message: "Unauthorized cron request" });
+    return false;
+  }
+  return true;
+}

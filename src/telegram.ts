@@ -2,7 +2,7 @@ import { Markup, Telegraf, type Context } from "telegraf";
 import { hashPassword } from "./auth.js";
 import { askGroqAssistant, transcribeAudio } from "./ai.js";
 import { categories, randomAvatarColor } from "./constants.js";
-import { PlanChangeModel, PlanModel, TelegramActivityModel, TelegramDraftModel, TelegramGroupModel, UserModel } from "./models.js";
+import { PlanChangeModel, PlanModel, ReportModel, TelegramActivityModel, TelegramDraftModel, TelegramGroupModel, UserModel } from "./models.js";
 import { createDailyReport, formatLeadSummary } from "./services.js";
 import type { Category } from "./types.js";
 
@@ -27,6 +27,19 @@ const inlineMenu = Markup.inlineKeyboard([
 ]);
 
 const appUrl = process.env.FRONTEND_URL || process.env.APP_URL || "https://daily-report-f.vercel.app";
+
+function todayIso() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function isSameIsoDay(date?: Date | null) {
+  return date?.toISOString().slice(0, 10) === todayIso();
+}
+
+function isWeekdayUtc() {
+  const weekday = new Date().getUTCDay();
+  return weekday !== 0 && weekday !== 6;
+}
 
 const departmentKeywords: Record<Category, string[]> = {
   "data-analytics": ["data", "данн", "аналит", "дашборд", "метрик", "bi"],
@@ -239,6 +252,8 @@ function groupDepartmentKeyboard() {
 function groupActionsKeyboard(enabled?: boolean) {
   return Markup.inlineKeyboard([
     [Markup.button.callback("Статус группы", "group:status"), Markup.button.callback("Сменить департамент", "group:department:choose")],
+    [Markup.button.callback("План группы", "plan:view"), Markup.button.callback("Дайджест дня", "group:digest:now")],
+    [Markup.button.callback("Отправить мотивацию", "group:motivation:now")],
     [
       enabled
         ? Markup.button.callback("Отключить мотивацию", "group:motivation:off")
@@ -251,6 +266,7 @@ function groupMenuKeyboard(enabled?: boolean) {
   return Markup.inlineKeyboard([
     [Markup.button.callback("План группы", "plan:view"), Markup.button.callback("Сводка группы", "summary:view")],
     [Markup.button.callback("Статус группы", "group:status"), Markup.button.callback("Сменить департамент", "group:department:choose")],
+    [Markup.button.callback("Дайджест дня", "group:digest:now"), Markup.button.callback("Отправить мотивацию", "group:motivation:now")],
     [
       enabled
         ? Markup.button.callback("Отключить мотивацию", "group:motivation:off")
@@ -282,7 +298,8 @@ function mainMenuKeyboard(role?: string) {
 
 function planKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback("Мои задачи", "tasks:mine"), Markup.button.callback("Все шаги", "plan:steps")],
+    [Markup.button.callback("Мои задачи", "tasks:mine"), Markup.button.callback("Свободные шаги", "tasks:available")],
+    [Markup.button.callback("Все шаги", "plan:steps")],
     [Markup.button.callback("Написать дэйлик", "daily:start"), Markup.button.callback("Сообщить блокер", "blocker:start")],
     [Markup.button.webApp("Открыть приложение", appUrl)]
   ]);
@@ -434,6 +451,65 @@ async function trackGroupText(ctx: Context, text: string) {
 
 async function trackGroupMessage(ctx: Context) {
   await trackGroupText(ctx, getTextFromMessage(ctx));
+}
+
+function shouldAnswerGroupQuestion(ctx: Context, text: string) {
+  if (!isGroupChat(ctx) || !text || text.startsWith("/")) return false;
+  const normalized = text.toLowerCase();
+  const botUsername = ctx.botInfo?.username?.toLowerCase();
+  const mentionsBot = botUsername ? normalized.includes(`@${botUsername}`) : false;
+  const repliesToBot =
+    ctx.message &&
+    "reply_to_message" in ctx.message &&
+    ctx.message.reply_to_message?.from?.id === ctx.botInfo?.id;
+  const asksPlan = /(план|шаг|задач|дедлайн|кто может|кому взять|что делать|архитектур|логик|блокер|прогресс)/i.test(text);
+  return Boolean((mentionsBot || repliesToBot) && asksPlan);
+}
+
+async function answerGroupQuestion(ctx: Context, text: string) {
+  if (!shouldAnswerGroupQuestion(ctx, text)) return false;
+
+  const group = await TelegramGroupModel.findOne({ chatId: String(ctx.chat!.id) });
+  const category = group?.category as Category | undefined;
+  if (!category) {
+    await ctx.reply("Я могу помочь по плану, но группа еще не привязана к департаменту.", {
+      reply_to_message_id: ctx.message?.message_id
+    } as Parameters<Context["reply"]>[1]);
+    return true;
+  }
+
+  const [plan, interns, reports] = await Promise.all([
+    PlanModel.findOne({ category, ...activePlanFilter }).sort({ createdAt: -1 }),
+    UserModel.find({ role: "intern", category }).sort({ telegramActivityScore: -1 }).limit(8),
+    ReportModel.find({ date: todayIso() }).sort({ createdAt: -1 }).limit(20)
+  ]);
+  const internIds = new Set(interns.map((user) => user.id));
+  const departmentReports = reports.filter((report) => internIds.has(report.userId.toString()));
+
+  const answer = await askGroqAssistant(`
+Ты Telegram-помощник mini ERP в группе департамента.
+Отвечай коротко, практично, по-русски. Не выдумывай данные, которых нет в контексте.
+Если вопрос про выбор исполнителя, предложи 1-3 стажеров и объясни почему на основе активности/AI-сводки/дэйликов.
+
+Вопрос:
+${text}
+
+Департамент: ${categories[category]}
+План: ${plan ? `${plan.title}, дедлайн ${plan.adjustedDeadline}` : "нет активного плана"}
+Шаги:
+${(plan?.steps || []).slice(0, 10).map((step) => `- ${step.title}; статус ${stepStatusLabel(step.status)}; дедлайн ${step.deadline}; ${step.assignedTo ? "назначен" : "свободен"}`).join("\n") || "нет шагов"}
+
+Стажеры:
+${interns.map((user) => `- ${user.name}; активность ${user.telegramActivityScore || 0}; ${user.telegramActivitySummary || "сводки нет"}`).join("\n") || "нет стажеров"}
+
+Сегодняшние дэйлики:
+${departmentReports.map((report) => `- ${report.yesterday}; план ${report.todayPlan}; блокеры ${report.blockers || "нет"}; score ${report.aiReview?.productivityScore || 0}`).join("\n") || "нет дэйликов"}
+`);
+
+  await ctx.reply(answer || "По текущим данным вижу план и активность, но не хватает фактов для уверенной рекомендации.", {
+    reply_to_message_id: ctx.message?.message_id
+  } as Parameters<Context["reply"]>[1]);
+  return true;
 }
 
 async function trackNewGroupMembers(ctx: Context) {
@@ -712,6 +788,201 @@ export async function sendWeekdayGroupMotivation() {
   return { sent };
 }
 
+async function sendGroupMotivationNow(ctx: Context) {
+  if (!(await requireGroupAdmin(ctx))) return;
+  deleteIncomingMessageLater(ctx);
+
+  if (ctx.chat?.type !== "group" && ctx.chat?.type !== "supergroup") {
+    await replyTemporary(ctx, "Мотивация отправляется только в группе департамента.");
+    return;
+  }
+
+  const group = await TelegramGroupModel.findOne({ chatId: String(ctx.chat.id) });
+  if (!group?.category) {
+    await replyTemporary(ctx, "Сначала привяжите группу к департаменту.", groupDepartmentKeyboard(), 15000);
+    return;
+  }
+
+  const message = await buildMotivationMessage(group.category as Category);
+  await ctx.reply(message, groupActionsKeyboard(group.motivationEnabled));
+}
+
+async function buildGroupDailyDigest(category: Category) {
+  const [plan, interns, todayReports] = await Promise.all([
+    PlanModel.findOne({ category, ...activePlanFilter }).sort({ createdAt: -1 }),
+    UserModel.find({ role: "intern", category }).sort({ telegramActivityScore: -1 }),
+    ReportModel.find({ date: todayIso() })
+  ]);
+
+  const internIds = new Set(interns.map((user) => user.id));
+  const departmentReports = todayReports.filter((report) => internIds.has(report.userId.toString()));
+  const reportUserIds = new Set(departmentReports.map((report) => report.userId.toString()));
+  const missing = interns.filter((user) => !reportUserIds.has(user.id)).slice(0, 6);
+  const blockers = departmentReports.filter((report) => report.blockers?.trim()).slice(0, 4);
+  const steps = plan?.steps || [];
+  const openSteps = steps.filter((step) => step.status !== "done" && step.status !== "canceled");
+  const doneSteps = steps.filter((step) => step.status === "done");
+  const avgScore = departmentReports.length
+    ? Math.round(departmentReports.reduce((sum, report) => sum + (report.aiReview?.productivityScore || 0), 0) / departmentReports.length)
+    : 0;
+
+  return [
+    `Дневной дайджест: ${categories[category]}`,
+    plan ? `План: ${plan.title}` : "Активный план пока не создан.",
+    plan ? `Шаги: ${doneSteps.length}/${steps.length} готово, ${openSteps.length} открыто.` : "",
+    `Дэйлики сегодня: ${departmentReports.length}/${interns.length}`,
+    departmentReports.length ? `Средняя продуктивность по AI: ${avgScore}%` : "AI еще не получил сегодняшние дэйлики.",
+    missing.length ? `Еще ждут дэйлик: ${missing.map((user) => user.name).join(", ")}` : "Все найденные стажеры уже отправили дэйлик.",
+    blockers.length ? `Блокеры: ${blockers.map((report) => report.blockers.slice(0, 90)).join("; ")}` : "Критичных блокеров в сегодняшних отчетах нет.",
+    openSteps.length ? `Фокус: ${openSteps.slice(0, 3).map((step) => step.title).join("; ")}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function sendGroupDailyDigestNow(ctx: Context) {
+  if (!(await requireGroupAdmin(ctx))) return;
+  deleteIncomingMessageLater(ctx);
+
+  if (ctx.chat?.type !== "group" && ctx.chat?.type !== "supergroup") {
+    await replyTemporary(ctx, "Дайджест отправляется только в группе департамента.");
+    return;
+  }
+
+  const group = await TelegramGroupModel.findOne({ chatId: String(ctx.chat.id) });
+  if (!group?.category) {
+    await replyTemporary(ctx, "Сначала привяжите группу к департаменту.", groupDepartmentKeyboard(), 15000);
+    return;
+  }
+
+  await ctx.reply(await buildGroupDailyDigest(group.category as Category), groupActionsKeyboard(group.motivationEnabled));
+}
+
+export async function sendWeekdayGroupDailyDigests() {
+  const bot = getTelegramBot();
+  if (!bot) throw new Error("Telegram bot is not configured");
+  if (!isWeekdayUtc()) return { sent: 0, skipped: "weekend" };
+
+  const groups = await TelegramGroupModel.find({
+    category: { $exists: true },
+    motivationEnabled: true,
+    chatId: { $type: "string", $ne: "" }
+  });
+
+  let sent = 0;
+  for (const group of groups) {
+    if (isSameIsoDay(group.groupDigestLastSentAt)) continue;
+    try {
+      await bot.telegram.sendMessage(group.chatId, await buildGroupDailyDigest(group.category as Category), groupActionsKeyboard(group.motivationEnabled));
+      group.groupDigestLastSentAt = new Date();
+      await group.save();
+      sent += 1;
+    } catch (error) {
+      console.error("Telegram group digest error", error);
+    }
+  }
+
+  return { sent };
+}
+
+export async function sendWeekdayPersonalFocus() {
+  const bot = getTelegramBot();
+  if (!bot) throw new Error("Telegram bot is not configured");
+  if (!isWeekdayUtc()) return { sent: 0, skipped: "weekend" };
+
+  const interns = await UserModel.find({
+    role: "intern",
+    category: { $exists: true },
+    telegramChatId: { $type: "string", $ne: "" }
+  });
+
+  let sent = 0;
+  for (const user of interns) {
+    if (isSameIsoDay(user.telegramFocusLastSentAt)) continue;
+    if (!user.telegramChatId?.trim()) continue;
+    const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
+    if (!plan) continue;
+
+    const assigned = (plan.steps || []).filter((step) => step.assignedTo?.toString() === user.id && step.status !== "done" && step.status !== "canceled");
+    const available = (plan.steps || []).filter((step) => !step.assignedTo && step.status !== "done" && step.status !== "canceled");
+    const focus = assigned[0] || available[0];
+    if (!focus) continue;
+
+    const message = [
+      `Фокус дня по плану "${plan.title}"`,
+      assigned.length ? `Ваш текущий шаг: ${focus.title}` : `Можно взять свободный шаг: ${focus.title}`,
+      `Дедлайн: ${focus.deadline}`,
+      "Если есть блокер, лучше зафиксировать его сразу."
+    ].join("\n");
+
+    try {
+      await bot.telegram.sendMessage(
+        user.telegramChatId,
+        message,
+        Markup.inlineKeyboard([
+          [Markup.button.callback(assigned.length ? "Мои задачи" : "Свободные шаги", assigned.length ? "tasks:mine" : "tasks:available")],
+          [Markup.button.callback("Написать дэйлик", "daily:start"), Markup.button.callback("Блокер", "blocker:start")]
+        ])
+      );
+      user.telegramFocusLastSentAt = new Date();
+      await user.save();
+      sent += 1;
+    } catch (error) {
+      console.error("Telegram personal focus error", error);
+    }
+  }
+
+  return { sent };
+}
+
+export async function sendWeekdayReportReminders() {
+  const bot = getTelegramBot();
+  if (!bot) throw new Error("Telegram bot is not configured");
+  if (!isWeekdayUtc()) return { sent: 0, skipped: "weekend" };
+
+  const interns = await UserModel.find({
+    role: "intern",
+    category: { $exists: true },
+    telegramChatId: { $type: "string", $ne: "" }
+  });
+  const reports = await ReportModel.find({ date: todayIso(), userId: { $in: interns.map((user) => user._id) } });
+  const reportedIds = new Set(reports.map((report) => report.userId.toString()));
+
+  let sent = 0;
+  for (const user of interns) {
+    if (reportedIds.has(user.id) || isSameIsoDay(user.telegramReportReminderLastSentAt)) continue;
+    if (!user.telegramChatId?.trim()) continue;
+    try {
+      await bot.telegram.sendMessage(
+        user.telegramChatId,
+        "Напоминание: сегодня еще нет вашего дэйлика. Коротко зафиксируйте, что сделали, план и блокеры — это помогает тимлиду быстрее понимать прогресс.",
+        Markup.inlineKeyboard([[Markup.button.callback("Написать дэйлик", "daily:start"), Markup.button.callback("Мои задачи", "tasks:mine")]])
+      );
+      user.telegramReportReminderLastSentAt = new Date();
+      await user.save();
+      sent += 1;
+    } catch (error) {
+      console.error("Telegram report reminder error", error);
+    }
+  }
+
+  return { sent };
+}
+
+export async function sendTelegramProductivityAutomation() {
+  const [focus, reminders, groupDigests] = await Promise.all([
+    sendWeekdayPersonalFocus(),
+    sendWeekdayReportReminders(),
+    sendWeekdayGroupDailyDigests()
+  ]);
+
+  return {
+    focus,
+    reminders,
+    groupDigests
+  };
+}
+
 export async function notifyDepartmentPlanChange(input: {
   planId: string;
   category: Category;
@@ -739,7 +1010,7 @@ export async function notifyDepartmentPlanChange(input: {
   });
 
   const bot = getTelegramBot();
-  if (!bot || !recipients.length) return change;
+  if (!bot) return change;
 
   const message = [
     "Изменение в плане департамента",
@@ -752,6 +1023,34 @@ export async function notifyDepartmentPlanChange(input: {
     [Markup.button.callback("Посмотреть план", "plan:view"), Markup.button.callback("Мои задачи", "tasks:mine")],
     [Markup.button.webApp("Открыть приложение", appUrl)]
   ]);
+
+  const groups = await TelegramGroupModel.find({
+    category: input.category,
+    chatId: { $type: "string", $ne: "" }
+  });
+
+  const groupMessage = [
+    input.type === "plan_created" ? "В департаменте опубликован новый план." : "План департамента обновлен.",
+    `Департамент: ${categories[input.category]}`,
+    input.summary,
+    "",
+    "Стажеры: откройте личный чат с ботом и нажмите «Свободные шаги», чтобы выбрать задачу для работы."
+  ].join("\n");
+
+  const groupButtons = Markup.inlineKeyboard([
+    [Markup.button.callback("План группы", "plan:view")],
+    [Markup.button.callback("Свободные шаги в личке", "tasks:available")],
+    [Markup.button.webApp("Открыть приложение", appUrl)]
+  ]);
+
+  for (const group of groups) {
+    try {
+      if (!group.chatId?.trim()) continue;
+      await bot.telegram.sendMessage(group.chatId, groupMessage, groupButtons);
+    } catch (error) {
+      console.error("Telegram group plan change notification error", error);
+    }
+  }
 
   for (const user of recipients) {
     try {
@@ -881,7 +1180,10 @@ async function sendMyTasks(ctx: Context) {
 
   const assignedSteps = (plan.steps || []).filter((step) => step.assignedTo?.toString() === user.id);
   if (!assignedSteps.length) {
-    await ctx.reply("Пока нет назначенных лично вам шагов. Можно посмотреть общий план.", Markup.inlineKeyboard([[Markup.button.callback("Все шаги", "plan:steps"), Markup.button.callback("Меню", "menu:view")]]));
+    await ctx.reply(
+      "Пока нет назначенных лично вам шагов. Можно выбрать свободный шаг из плана департамента.",
+      Markup.inlineKeyboard([[Markup.button.callback("Свободные шаги", "tasks:available"), Markup.button.callback("Все шаги", "plan:steps")]])
+    );
     return;
   }
 
@@ -910,12 +1212,55 @@ async function sendAllPlanSteps(ctx: Context) {
     return;
   }
 
-  const lines = (plan.steps || []).slice(0, 12).map((step, index) => {
+  const steps = (plan.steps || []).slice(0, 12);
+  const lines = steps.map((step, index) => {
     const status = stepStatusLabel(step.status);
     const mine = step.assignedTo?.toString() === user.id ? " | ваше" : "";
-    return `${index + 1}. ${step.title} - до ${step.deadline} | ${status}${mine}`;
+    const assigned = step.assignedTo && step.assignedTo.toString() !== user.id ? " | уже назначен" : "";
+    return `${index + 1}. ${step.title} - до ${step.deadline} | ${status}${mine}${assigned}`;
   });
-  await ctx.reply(lines.length ? lines.join("\n") : "В плане пока нет шагов.", planKeyboard());
+
+  const claimRows = steps
+    .filter((step) => !step.assignedTo && step.status !== "done" && step.status !== "canceled")
+    .slice(0, 8)
+    .map((step, index) => [Markup.button.callback(`Взять шаг ${index + 1}`, `task:claim:${step._id.toString()}`)]);
+
+  await ctx.reply(
+    lines.length ? [`План "${plan.title}"`, ...lines].join("\n") : "В плане пока нет шагов.",
+    claimRows.length
+      ? Markup.inlineKeyboard([...claimRows, [Markup.button.callback("Мои задачи", "tasks:mine"), Markup.button.callback("Меню", "menu:view")]])
+      : planKeyboard()
+  );
+}
+
+async function claimPlanStep(ctx: Context, stepId: string) {
+  if (!(await requirePrivateChat(ctx, "Выбор шага доступен только в личном чате с ботом."))) return;
+  const user = await requireLinkedUser(ctx);
+  if (!user?.category) {
+    await ctx.reply("Сначала выберите департамент на сайте.");
+    return;
+  }
+
+  const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
+  const step = plan?.steps.id(stepId);
+  if (!plan || !step) {
+    await ctx.reply("Этот шаг уже недоступен или план был обновлен.", planKeyboard());
+    return;
+  }
+
+  if (step.assignedTo && step.assignedTo.toString() !== user.id) {
+    await ctx.reply("Этот шаг уже назначен другому стажеру. Можно выбрать другой свободный шаг.", Markup.inlineKeyboard([[Markup.button.callback("Свободные шаги", "tasks:available")]]));
+    return;
+  }
+
+  step.assignedTo = user._id as any;
+  if (step.status === "todo") step.status = "in_progress";
+  await plan.save();
+
+  await ctx.reply(
+    [`Шаг назначен вам: ${step.title}`, `Дедлайн: ${step.deadline}`, `Статус: ${stepStatusLabel(step.status)}`].join("\n"),
+    taskKeyboard(step._id.toString(), step.status)
+  );
 }
 
 async function updateTaskStatus(ctx: Context, stepId: string, status: PlanStepStatus) {
@@ -1304,6 +1649,7 @@ bot.start(async (ctx) => {
   bot.hears("План", (ctx) => sendPlan(ctx));
   bot.hears("Дэйлик", (ctx) => sendReportHelp(ctx));
   bot.hears("Мои задачи", (ctx) => sendMyTasks(ctx));
+  bot.hears("Свободные шаги", (ctx) => sendAllPlanSteps(ctx));
   bot.hears("Блокер", (ctx) => startBlockerWizard(ctx));
   bot.hears("Сводка", (ctx) => sendSummary(ctx));
   bot.hears("Автосводка", (ctx) => sendDigestStatus(ctx));
@@ -1312,13 +1658,17 @@ bot.start(async (ctx) => {
   bot.command("group_status", (ctx) => sendGroupStatusWithButtons(ctx));
   bot.command("motivation_on", (ctx) => setGroupMotivation(ctx, true));
   bot.command("motivation_off", (ctx) => setGroupMotivation(ctx, false));
+  bot.command("motivation", (ctx) => sendGroupMotivationNow(ctx));
+  bot.command("day_digest", (ctx) => sendGroupDailyDigestNow(ctx));
 
   bot.on("voice", (ctx) => handleVoiceMessage(ctx));
 
   bot.on("message", async (ctx, next) => {
     if (await handleDraftMessage(ctx)) return;
     await trackNewGroupMembers(ctx);
-    await trackGroupMessage(ctx);
+    const text = getTextFromMessage(ctx);
+    await trackGroupText(ctx, text);
+    if (await answerGroupQuestion(ctx, text)) return;
     return next();
   });
 
@@ -1383,10 +1733,28 @@ bot.start(async (ctx) => {
     await setGroupMotivation(ctx, false);
     await sendGroupStatusWithButtons(ctx);
   });
+  bot.action("group:motivation:now", async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    await ctx.answerCbQuery("Отправляю мотивацию");
+    await sendGroupMotivationNow(ctx);
+  });
+  bot.action("group:digest:now", async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    await ctx.answerCbQuery("Собираю дайджест");
+    await sendGroupDailyDigestNow(ctx);
+  });
 
   bot.action("tasks:mine", async (ctx) => {
     await ctx.answerCbQuery();
     await sendMyTasks(ctx);
+  });
+  bot.action("tasks:available", async (ctx) => {
+    if (isGroupChat(ctx)) {
+      await ctx.answerCbQuery("Свободные шаги выбираются в личном чате с ботом.", { show_alert: true });
+      return;
+    }
+    await ctx.answerCbQuery();
+    await sendAllPlanSteps(ctx);
   });
   bot.action("plan:steps", async (ctx) => {
     await ctx.answerCbQuery();
@@ -1411,6 +1779,10 @@ bot.start(async (ctx) => {
   bot.action(/^task:status:([a-f0-9]{24}):(todo|in_progress|done|canceled)$/, async (ctx) => {
     await ctx.answerCbQuery("Обновляю статус");
     await updateTaskStatus(ctx, ctx.match[1], ctx.match[2] as PlanStepStatus);
+  });
+  bot.action(/^task:claim:([a-f0-9]{24})$/, async (ctx) => {
+    await ctx.answerCbQuery("Назначаю шаг");
+    await claimPlanStep(ctx, ctx.match[1]);
   });
   bot.action(/^task:blocker:([a-f0-9]{24})$/, async (ctx) => {
     await ctx.answerCbQuery();
@@ -1502,6 +1874,7 @@ bot.start(async (ctx) => {
   });
 
   bot.command("plan", (ctx) => sendPlan(ctx));
+  bot.command("steps", (ctx) => sendAllPlanSteps(ctx));
   bot.command("summary", (ctx) => sendSummary(ctx));
 
   bot.command("digest", async (ctx) => {
@@ -1557,8 +1930,11 @@ bot.start(async (ctx) => {
   void bot.telegram.setMyCommands([
     { command: "menu", description: "Открыть меню" },
     { command: "plan", description: "План департамента" },
+    { command: "steps", description: "Свободные шаги" },
     { command: "report", description: "Отправить дэйлик" },
     { command: "summary", description: "Сводка для тимлида" },
+    { command: "day_digest", description: "Дайджест группы" },
+    { command: "motivation", description: "Мотивация группы" },
     { command: "digest", description: "Автосводка для тимлида" },
     { command: "link", description: "Привязать Telegram к аккаунту" }
   ]);

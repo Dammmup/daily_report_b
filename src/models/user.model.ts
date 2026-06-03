@@ -30,6 +30,8 @@ const userSchema = new Schema(
     telegramDigestTime: { type: String, default: "18:00" },
     telegramDigestContent: { type: String, enum: ["productivity", "reports", "full"], default: "full" },
     telegramDigestLastSentAt: { type: Date },
+    telegramFocusLastSentAt: { type: Date },
+    telegramReportReminderLastSentAt: { type: Date },
     telegramLinkToken: { type: String },
     telegramLinkTokenExpiresAt: { type: Date },
     lastDepartmentChangedAt: { type: Date },

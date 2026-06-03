@@ -16,6 +16,18 @@
     {
       "path": "/api/telegram/motivation-cron",
       "schedule": "30 4 * * 1-5"
+    },
+    {
+      "path": "/api/telegram/personal-focus-cron",
+      "schedule": "45 4 * * 1-5"
+    },
+    {
+      "path": "/api/telegram/report-reminder-cron",
+      "schedule": "30 11 * * 1-5"
+    },
+    {
+      "path": "/api/telegram/group-digest-cron",
+      "schedule": "30 12 * * 1-5"
     }
   ]
 }

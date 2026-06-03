@@ -13,6 +13,8 @@ const telegramGroupSchema = new Schema(
     membersSeen: { type: Number, default: 0 },
     motivationEnabled: { type: Boolean, default: true },
     motivationLastSentAt: { type: Date },
+    groupDigestLastSentAt: { type: Date },
+    dailyReminderLastSentAt: { type: Date },
     lastActivityAt: { type: Date }
   },
   { timestamps: true }
