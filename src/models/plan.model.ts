@@ -16,6 +16,8 @@ const stepSchema = new Schema(
   {
     title: { type: String, required: true },
     description: { type: String, default: "" },
+    technicalSpec: { type: String, default: "" },
+    technicalInstruction: { type: String, default: "" },
     deadline: { type: String, required: true },
     status: { type: String, enum: ["todo", "in_progress", "done", "canceled"], default: "todo" },
     assignedTo: { type: Schema.Types.ObjectId, ref: "User", required: false },

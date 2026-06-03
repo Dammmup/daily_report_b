@@ -167,6 +167,8 @@ planRouter.post("/department-plan/steps", auth, requireRole("lead"), async (req:
   plan.steps.push({
     title: body.data.title,
     description: body.data.description,
+    technicalSpec: body.data.technicalSpec,
+    technicalInstruction: body.data.technicalInstruction,
     deadline: body.data.deadline,
     assignedTo: body.data.assignedTo ? new Types.ObjectId(body.data.assignedTo) : undefined,
     status: "todo",
@@ -195,14 +197,19 @@ planRouter.post("/department-plan/steps", auth, requireRole("lead"), async (req:
   res.status(201).json(serializePlan(plan));
 });
 
-planRouter.patch("/department-plan/steps/:stepId", auth, requireRole("lead"), async (req: AuthedRequest, res) => {
+planRouter.patch("/department-plan/steps/:stepId", auth, requireRole("lead", "admin"), async (req: AuthedRequest, res) => {
   const body = planStepUpdateSchema.safeParse(req.body);
   if (!body.success) {
     res.status(400).json({ message: "Некорректное обновление шага" });
     return;
   }
 
-  const plan = req.user!.category ? await PlanModel.findOne(activePlanQuery(req.user!.category)).sort({ createdAt: -1 }) : null;
+  const plan =
+    req.user!.role === "admin"
+      ? await PlanModel.findOne({ "steps._id": req.params.stepId } as any).sort({ createdAt: -1 })
+      : req.user!.category
+        ? await PlanModel.findOne(activePlanQuery(req.user!.category)).sort({ createdAt: -1 })
+        : null;
   const step = plan?.steps.id(String(req.params.stepId));
   if (!plan || !step) {
     res.status(404).json({ message: "Шаг плана не найден" });
@@ -217,15 +224,17 @@ planRouter.patch("/department-plan/steps/:stepId", auth, requireRole("lead"), as
   };
 
   if (body.data.assignedTo) {
-    const assignee = await UserModel.findOne({ _id: body.data.assignedTo, role: "intern", category: req.user!.category });
+    const assignee = await UserModel.findOne({ _id: body.data.assignedTo, role: "intern", category: plan.category });
     if (!assignee) {
-      res.status(400).json({ message: "Стажер должен быть из вашего департамента" });
+      res.status(400).json({ message: "Стажер должен быть из департамента плана" });
       return;
     }
   }
 
   if (body.data.title !== undefined) step.title = body.data.title;
   if (body.data.description !== undefined) step.description = body.data.description;
+  if (body.data.technicalSpec !== undefined) step.technicalSpec = body.data.technicalSpec;
+  if (body.data.technicalInstruction !== undefined) step.technicalInstruction = body.data.technicalInstruction;
   if (body.data.deadline !== undefined) step.deadline = body.data.deadline;
   if (body.data.status !== undefined) step.status = body.data.status;
   if (body.data.assignedTo !== undefined) {

@@ -29,9 +29,9 @@ export async function auth(req: AuthedRequest, res: Response, next: NextFunction
   }
 }
 
-export function requireRole(role: Role) {
+export function requireRole(...roles: Role[]) {
   return (req: AuthedRequest, res: Response, next: NextFunction) => {
-    if (req.user?.role !== role) {
+    if (!req.user || !roles.includes(req.user.role)) {
       res.status(403).json({ message: "Недостаточно прав" });
       return;
     }

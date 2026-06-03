@@ -66,9 +66,30 @@ export const planSchema = z.object({
   milestones: z.array(z.string()).min(2)
 });
 
+export const adminPlanSchema = planSchema.extend({
+  category: categorySchema,
+  leadId: z.string().min(1),
+  steps: z
+    .array(
+      z.object({
+        title: z.string().min(3),
+        description: z.string().default(""),
+        technicalSpec: z.string().max(3000).default(""),
+        technicalInstruction: z.string().max(3000).default(""),
+        deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        assignedTo: z.string().optional().or(z.literal("")),
+        status: z.enum(["todo", "in_progress", "done", "canceled"]).default("todo"),
+        source: z.enum(["ai", "manual"]).default("manual")
+      })
+    )
+    .optional()
+});
+
 export const planStepCreateSchema = z.object({
   title: z.string().min(3),
   description: z.string().default(""),
+  technicalSpec: z.string().max(3000).default(""),
+  technicalInstruction: z.string().max(3000).default(""),
   deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   assignedTo: z.string().optional().or(z.literal(""))
 });
@@ -76,6 +97,8 @@ export const planStepCreateSchema = z.object({
 export const planStepUpdateSchema = z.object({
   title: z.string().min(3).optional(),
   description: z.string().optional(),
+  technicalSpec: z.string().max(3000).optional(),
+  technicalInstruction: z.string().max(3000).optional(),
   deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   assignedTo: z.string().optional().nullable(),
   status: z.enum(["todo", "in_progress", "done", "canceled"]).optional()

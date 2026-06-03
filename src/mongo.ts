@@ -34,6 +34,7 @@ async function bootstrapDatabase() {
   await migrateLegacyCategories();
   await mergeTelegramShadowUsers();
   await dropLegacyPlanCategoryUniqueIndex();
+  await dropLegacyPlanUserIdUniqueIndex();
   await seedAdmin();
 }
 
@@ -211,6 +212,15 @@ async function dropLegacyPlanCategoryUniqueIndex() {
     console.log("MongoDB migrated: dropped legacy unique plan category index.");
   } catch {
     // The index may not exist on fresh databases.
+  }
+}
+
+async function dropLegacyPlanUserIdUniqueIndex() {
+  try {
+    await PlanModel.collection.dropIndex("userId_1");
+    console.log("MongoDB migrated: dropped legacy unique plan userId index.");
+  } catch {
+    // The index may not exist.
   }
 }
 

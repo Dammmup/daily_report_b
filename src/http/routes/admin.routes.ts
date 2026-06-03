@@ -1,11 +1,28 @@
 import { Router } from "express";
+import { decomposeProjectPlan } from "../../ai.js";
+import { categories, todayIso } from "../../constants.js";
+import { notifyDepartmentPlanChange } from "../../telegram.js";
+import type { Category } from "../../types.js";
 import { PlanModel, UserModel } from "../../models.js";
 import { buildAiSummary, buildDashboard, buildDecisionCenter, buildInternAiProfile } from "../../services.js";
 import { auth, requireRole, type AuthedRequest } from "../middleware/auth.js";
-import { adminUserUpdateSchema } from "../schemas.js";
+import { adminPlanSchema, adminUserUpdateSchema } from "../schemas.js";
 import { publicUser, serializePlan, serializeReport } from "../serializers.js";
 
 export const adminRouter = Router();
+const activePlanStatuses = ["draft", "approved"] as const;
+
+function activePlanQuery(category: Category | string) {
+  return { category, status: { $in: activePlanStatuses } } as any;
+}
+
+async function notifyAdminPlanChangeSafely(input: Parameters<typeof notifyDepartmentPlanChange>[0]) {
+  try {
+    await notifyDepartmentPlanChange(input);
+  } catch (error) {
+    console.error("Admin plan saved, but Telegram notification failed", error);
+  }
+}
 
 adminRouter.get("/admin/users", auth, requireRole("admin"), async (_req: AuthedRequest, res) => {
   const users = await UserModel.find().sort({ role: 1, name: 1 });
@@ -59,6 +76,134 @@ adminRouter.get("/admin/plans", auth, requireRole("admin"), async (_req: AuthedR
       };
     })
   );
+});
+
+adminRouter.post("/admin/plans/preview", auth, requireRole("admin"), async (req: AuthedRequest, res) => {
+  const body = adminPlanSchema.safeParse(req.body);
+  if (!body.success) {
+    res.status(400).json({ message: "Некорректный план проекта" });
+    return;
+  }
+
+  const category = body.data.category as Category;
+  const existing = await PlanModel.findOne(activePlanQuery(category)).sort({ createdAt: -1 });
+  const startDate = existing?.startDate || todayIso();
+  const steps = await decomposeProjectPlan({
+    title: body.data.title,
+    milestones: body.data.milestones,
+    startDate,
+    baseDeadline: body.data.baseDeadline,
+    categoryLabel: categories[category]
+  });
+
+  res.json({
+    startDate,
+    adjustedDeadline: existing?.adjustedDeadline || body.data.baseDeadline,
+    steps: steps.map((step) => ({
+      title: step.title,
+      description: step.description || "",
+      technicalSpec: "",
+      technicalInstruction: "",
+      deadline: step.deadline,
+      assignedTo: "",
+      status: "todo",
+      source: step.source || "ai"
+    }))
+  });
+});
+
+adminRouter.post("/admin/plans", auth, requireRole("admin"), async (req: AuthedRequest, res) => {
+  const body = adminPlanSchema.safeParse(req.body);
+  if (!body.success) {
+    res.status(400).json({ message: "Некорректный план проекта" });
+    return;
+  }
+
+  const category = body.data.category as Category;
+  const lead = await UserModel.findOne({ _id: body.data.leadId, role: "lead" });
+  if (!lead) {
+    res.status(400).json({ message: "Выберите действующего тимлида" });
+    return;
+  }
+
+  if (lead.category && lead.category !== category) {
+    res.status(400).json({ message: "Тимлид уже закреплен за другим департаментом" });
+    return;
+  }
+
+  if (!lead.category) {
+    lead.category = category;
+    lead.firstLoginCompleted = true;
+    await lead.save();
+  }
+
+  const existing = await PlanModel.findOne(activePlanQuery(category)).sort({ createdAt: -1 });
+  const startDate = existing?.startDate || todayIso();
+  const steps = body.data.steps?.length
+    ? body.data.steps.map((step) => ({
+        title: step.title,
+        description: step.description,
+        technicalSpec: step.technicalSpec,
+        technicalInstruction: step.technicalInstruction,
+        deadline: step.deadline,
+        assignedTo: step.assignedTo ? step.assignedTo : undefined,
+        status: step.status,
+        source: step.source
+      }))
+    : await decomposeProjectPlan({
+        title: body.data.title,
+        milestones: body.data.milestones,
+        startDate,
+        baseDeadline: body.data.baseDeadline,
+        categoryLabel: categories[category]
+      });
+
+  const payload = {
+    leadId: lead._id,
+    title: body.data.title,
+    category,
+    version: existing?.version || (await PlanModel.countDocuments({ category })) + 1,
+    status: "approved" as const,
+    startDate,
+    baseDeadline: body.data.baseDeadline,
+    adjustedDeadline: existing?.adjustedDeadline || body.data.baseDeadline,
+    milestones: body.data.milestones,
+    steps,
+    issues: existing?.issues || [],
+    aiRationale: "AI разложил утвержденный администратором план на шаги. Тимлид может уточнить ТЗ, инструкции и назначить исполнителей."
+  };
+
+  const plan = existing
+    ? await PlanModel.findByIdAndUpdate(existing._id, payload, { new: true })
+    : await PlanModel.create(payload);
+
+  if (!plan) {
+    res.status(500).json({ message: "Не удалось сохранить план" });
+    return;
+  }
+
+  await notifyAdminPlanChangeSafely({
+    planId: plan.id,
+    category,
+    actorId: req.user!.id,
+    type: existing ? "plan_updated" : "plan_created",
+    title: existing ? "План обновлен администратором" : "План создан администратором",
+    summary: `Администратор назначил тимлида ${lead.name} и обновил план "${plan.title}". Дедлайн: ${plan.adjustedDeadline}. Шагов: ${plan.steps.length}.`
+  });
+
+  const serialized = serializePlan(plan);
+  res.status(201).json({ ...serialized, lead: publicUser(lead) });
+});
+
+adminRouter.delete("/admin/plans/:id", auth, requireRole("admin"), async (req: AuthedRequest, res) => {
+  const plan = await PlanModel.findById(req.params.id);
+  if (!plan) {
+    res.status(404).json({ message: "План не найден" });
+    return;
+  }
+
+  await PlanModel.deleteOne({ _id: plan._id });
+  res.json({ ok: true });
 });
 
 adminRouter.patch("/admin/users/:id", auth, requireRole("admin"), async (req: AuthedRequest, res) => {

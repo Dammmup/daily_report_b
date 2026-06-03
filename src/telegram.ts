@@ -195,7 +195,10 @@ function formatPlanForTelegram(plan: Awaited<ReturnType<typeof PlanModel.findOne
     .map((step, index) => {
       const assigned = step.assignedTo?.toString() === chatUserId ? " | назначено вам" : step.assignedTo ? " | назначено" : "";
       const status = stepStatusLabel(step.status);
-      return `${index + 1}. ${step.title} - до ${step.deadline} | ${status}${assigned}`;
+      const details = [step.description, step.technicalSpec ? `ТЗ: ${step.technicalSpec}` : "", step.technicalInstruction ? `Инструкция: ${step.technicalInstruction}` : ""]
+        .filter(Boolean)
+        .join(" ");
+      return `${index + 1}. ${step.title} - до ${step.deadline} | ${status}${assigned}${details ? `\n   ${details.slice(0, 220)}` : ""}`;
     })
     .join("\n");
 
@@ -1591,7 +1594,7 @@ export function startTelegramBot() {
     return;
   }
 
-  bot.launch();
+  bot.launch().catch((err) => console.error("Telegram bot launch error:", err));
   console.log("Telegram bot started in polling mode.");
 
   process.once("SIGINT", () => bot.stop("SIGINT"));
