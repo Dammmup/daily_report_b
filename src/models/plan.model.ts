@@ -45,6 +45,7 @@ const planSchema = new Schema(
     steps: { type: [stepSchema], default: [] },
     issues: { type: [issueSchema], default: [] },
     aiRationale: { type: String, required: true },
+    telegramAnnouncedAt: { type: Date },
     completedAt: { type: Date }
   },
   { timestamps: true }

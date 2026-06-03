@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { decomposeProjectPlan } from "../../ai.js";
 import { categories, todayIso } from "../../constants.js";
-import { notifyDepartmentPlanChange } from "../../telegram.js";
+import { notifyDepartmentPlanChange, sendTelegramRecoveryBroadcast } from "../../telegram.js";
 import type { Category } from "../../types.js";
 import { PlanModel, UserModel } from "../../models.js";
 import { buildAiSummary, buildDashboard, buildDecisionCenter, buildInternAiProfile } from "../../services.js";
@@ -76,6 +76,14 @@ adminRouter.get("/admin/plans", auth, requireRole("admin"), async (_req: AuthedR
       };
     })
   );
+});
+
+adminRouter.post("/admin/telegram/recovery-broadcast", auth, requireRole("admin"), async (_req: AuthedRequest, res, next) => {
+  try {
+    res.json(await sendTelegramRecoveryBroadcast());
+  } catch (error) {
+    next(error);
+  }
 });
 
 adminRouter.post("/admin/plans/preview", auth, requireRole("admin"), async (req: AuthedRequest, res) => {

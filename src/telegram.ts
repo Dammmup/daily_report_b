@@ -1043,13 +1043,19 @@ export async function notifyDepartmentPlanChange(input: {
     [Markup.button.webApp("Открыть приложение", appUrl)]
   ]);
 
+  let groupSent = 0;
   for (const group of groups) {
     try {
       if (!group.chatId?.trim()) continue;
       await bot.telegram.sendMessage(group.chatId, groupMessage, groupButtons);
+      groupSent += 1;
     } catch (error) {
       console.error("Telegram group plan change notification error", error);
     }
+  }
+
+  if (groupSent > 0) {
+    await PlanModel.updateOne({ _id: input.planId }, { $set: { telegramAnnouncedAt: new Date() } });
   }
 
   for (const user of recipients) {
@@ -1062,6 +1068,82 @@ export async function notifyDepartmentPlanChange(input: {
   }
 
   return change;
+}
+
+export async function sendTelegramRecoveryBroadcast() {
+  const bot = getTelegramBot();
+  if (!bot) throw new Error("Telegram bot is not configured");
+
+  const groups = await TelegramGroupModel.find({
+    category: { $exists: true },
+    chatId: { $type: "string", $ne: "" }
+  });
+
+  let motivationMessages = 0;
+  for (const group of groups) {
+    try {
+      if (!group.chatId?.trim() || !group.category) continue;
+      await bot.telegram.sendMessage(group.chatId, await buildMotivationMessage(group.category as Category), groupActionsKeyboard(group.motivationEnabled));
+      motivationMessages += 1;
+    } catch (error) {
+      console.error("Telegram manual motivation broadcast error", error);
+    }
+  }
+
+  const pendingPlans = await PlanModel.find({
+    status: { $in: ["draft", "approved"] },
+    $or: [{ telegramAnnouncedAt: { $exists: false } }, { telegramAnnouncedAt: null }]
+  }).sort({ category: 1, createdAt: -1 });
+
+  let planAnnouncementMessages = 0;
+  let announcedPlans = 0;
+  for (const plan of pendingPlans) {
+    const planGroups = groups.filter((group) => group.category === plan.category);
+    if (!planGroups.length) continue;
+
+    const message = [
+      "План департамента доступен для работы.",
+      `Департамент: ${categories[plan.category as Category]}`,
+      `План: ${plan.title}`,
+      `Дедлайн: ${plan.adjustedDeadline}`,
+      `Шагов: ${plan.steps.length}`,
+      "",
+      "Стажеры: откройте личный чат с ботом и нажмите «Свободные шаги», чтобы выбрать задачу."
+    ].join("\n");
+
+    let sentForPlan = 0;
+    for (const group of planGroups) {
+      try {
+        if (!group.chatId?.trim()) continue;
+        await bot.telegram.sendMessage(
+          group.chatId,
+          message,
+          Markup.inlineKeyboard([
+            [Markup.button.callback("План группы", "plan:view"), Markup.button.callback("Свободные шаги в личке", "tasks:available")],
+            [Markup.button.webApp("Открыть приложение", appUrl)]
+          ])
+        );
+        sentForPlan += 1;
+        planAnnouncementMessages += 1;
+      } catch (error) {
+        console.error("Telegram manual plan announcement error", error);
+      }
+    }
+
+    if (sentForPlan > 0) {
+      plan.telegramAnnouncedAt = new Date();
+      await plan.save();
+      announcedPlans += 1;
+    }
+  }
+
+  return {
+    groups: groups.length,
+    motivationMessages,
+    pendingPlans: pendingPlans.length,
+    announcedPlans,
+    planAnnouncementMessages
+  };
 }
 
 async function getLinkedUser(ctx: Context) {

@@ -64,6 +64,7 @@ export function serializePlan(plan: PlanDocument | null) {
       overdue: isStepOverdue(step)
     })),
     issues: item.issues.map((issue) => ({ ...issue, id: issue._id.toString() })),
+    telegramAnnouncedAt: item.telegramAnnouncedAt?.toISOString(),
     createdAt: plan.createdAt.toISOString(),
     updatedAt: plan.updatedAt.toISOString()
   };
