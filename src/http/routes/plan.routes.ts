@@ -16,6 +16,14 @@ function activePlanQuery(category: Category | string) {
   return { category, status: { $in: activePlanStatuses } } as any;
 }
 
+async function notifyPlanChangeSafely(input: Parameters<typeof notifyDepartmentPlanChange>[0]) {
+  try {
+    await notifyDepartmentPlanChange(input);
+  } catch (error) {
+    console.error("Plan saved, but Telegram plan notification failed", error);
+  }
+}
+
 planRouter.get("/my-plan", auth, async (req: AuthedRequest, res) => {
   if (!req.user!.category) {
     res.json(null);
@@ -82,7 +90,7 @@ planRouter.post("/department-plan", auth, requireRole("lead"), async (req: Authe
     return;
   }
 
-  await notifyDepartmentPlanChange({
+  await notifyPlanChangeSafely({
     planId: plan.id,
     category,
     actorId: req.user!.id,
@@ -114,7 +122,7 @@ planRouter.post("/department-plan/:planId/complete", auth, requireRole("lead"), 
   plan.completedAt = new Date();
   await plan.save();
 
-  await notifyDepartmentPlanChange({
+  await notifyPlanChangeSafely({
     planId: plan.id,
     category: plan.category as Category,
     actorId: req.user!.id,
@@ -166,7 +174,7 @@ planRouter.post("/department-plan/steps", auth, requireRole("lead"), async (req:
   });
   await plan.save();
   const addedStep = plan.steps[plan.steps.length - 1];
-  await notifyDepartmentPlanChange({
+  await notifyPlanChangeSafely({
     planId: plan.id,
     category: plan.category as Category,
     actorId: req.user!.id,
@@ -232,7 +240,7 @@ planRouter.patch("/department-plan/steps/:stepId", auth, requireRole("lead"), as
     before.status !== step.status ? `статус: ${before.status} -> ${step.status}` : ""
   ].filter(Boolean);
 
-  await notifyDepartmentPlanChange({
+  await notifyPlanChangeSafely({
     planId: plan.id,
     category: plan.category as Category,
     actorId: req.user!.id,

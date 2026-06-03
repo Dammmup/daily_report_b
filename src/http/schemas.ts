@@ -1,6 +1,7 @@
 import { z } from "zod";
+import { categoryValues } from "../constants.js";
 
-export const categorySchema = z.enum(["data-system-ml", "marketing-sales", "erp-development", "data-security"]);
+export const categorySchema = z.enum(categoryValues);
 
 export const requestCodeSchema = z
   .object({
@@ -81,7 +82,8 @@ export const planStepUpdateSchema = z.object({
 });
 
 export const departmentSchema = z.object({
-  category: categorySchema
+  category: categorySchema,
+  reason: z.string().min(10).max(700).optional()
 });
 
 export const adminUserUpdateSchema = z.object({
@@ -93,6 +95,10 @@ export const telegramDigestSchema = z.object({
   enabled: z.boolean(),
   time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
   content: z.enum(["productivity", "reports", "full"])
+});
+
+export const telegramMiniAppSessionSchema = z.object({
+  initData: z.string().min(20)
 });
 
 export const assistantPlanFitSchema = z.object({

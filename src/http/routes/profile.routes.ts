@@ -1,4 +1,5 @@
 import { Router } from "express";
+import crypto from "node:crypto";
 import { hashPassword, verifyPassword } from "../../auth.js";
 import { AuditLogModel } from "../../models.js";
 import { auth, type AuthedRequest } from "../middleware/auth.js";

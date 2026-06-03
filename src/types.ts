@@ -1,8 +1,11 @@
 export type Role = "intern" | "lead" | "admin";
 
 export type Category =
-  | "data-system-ml"
-  | "marketing-sales"
+  | "data-analytics"
+  | "system-analytics"
+  | "machine-learning"
+  | "marketing"
+  | "sales"
   | "erp-development"
   | "data-security";
 

@@ -1,10 +1,11 @@
 import mongoose, { Schema } from "mongoose";
+import { categoryValues } from "../constants.js";
 
 const officeLocationSchema = new Schema(
   {
     category: {
       type: String,
-      enum: ["data-system-ml", "marketing-sales", "erp-development", "data-security"],
+      enum: categoryValues,
       required: true,
       unique: true,
       index: true

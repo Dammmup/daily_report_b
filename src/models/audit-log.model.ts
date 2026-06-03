@@ -1,4 +1,5 @@
 import mongoose, { Schema } from "mongoose";
+import { categoryValues } from "../constants.js";
 
 const auditLogSchema = new Schema(
   {
@@ -8,7 +9,7 @@ const auditLogSchema = new Schema(
     entityId: { type: String },
     category: {
       type: String,
-      enum: ["data-system-ml", "marketing-sales", "erp-development", "data-security"],
+      enum: categoryValues,
       required: false,
       index: true
     },

@@ -1,4 +1,5 @@
 import mongoose, { Schema } from "mongoose";
+import { categoryValues } from "../constants.js";
 
 const issueSchema = new Schema(
   {
@@ -29,7 +30,7 @@ const planSchema = new Schema(
     title: { type: String, required: true },
     category: {
       type: String,
-      enum: ["data-system-ml", "marketing-sales", "erp-development", "data-security"],
+      enum: categoryValues,
       required: true,
       index: true
     },

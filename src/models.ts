@@ -1,5 +1,6 @@
 export * from "./models/audit-log.model.js";
 export * from "./models/attendance.model.js";
+export * from "./models/department-change.model.js";
 export * from "./models/office-location.model.js";
 export * from "./models/plan-change.model.js";
 export * from "./models/plan.model.js";

@@ -1,11 +1,12 @@
 import mongoose, { Schema } from "mongoose";
+import { categoryValues } from "../constants.js";
 
 const planChangeSchema = new Schema(
   {
     planId: { type: Schema.Types.ObjectId, ref: "Plan", required: true, index: true },
     category: {
       type: String,
-      enum: ["data-system-ml", "marketing-sales", "erp-development", "data-security"],
+      enum: categoryValues,
       required: true,
       index: true
     },

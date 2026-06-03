@@ -1,4 +1,5 @@
 import mongoose, { Schema } from "mongoose";
+import { categoryValues } from "../constants.js";
 
 const telegramGroupSchema = new Schema(
   {
@@ -6,7 +7,7 @@ const telegramGroupSchema = new Schema(
     title: { type: String, required: true },
     category: {
       type: String,
-      enum: ["data-system-ml", "marketing-sales", "erp-development", "data-security"],
+      enum: categoryValues,
       required: false
     },
     membersSeen: { type: Number, default: 0 },

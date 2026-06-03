@@ -31,6 +31,8 @@ export function publicUser(user: UserDocument) {
     telegramActivityMessages: user.telegramActivityMessages,
     telegramActivityScore: user.telegramActivityScore,
     telegramActivitySummary: user.telegramActivitySummary,
+    lastDepartmentChangedAt: user.lastDepartmentChangedAt?.toISOString(),
+    lastDepartmentChangeReason: user.lastDepartmentChangeReason,
     lastActiveAt: user.lastActiveAt.toISOString()
   };
 }

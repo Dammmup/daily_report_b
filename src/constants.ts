@@ -1,10 +1,30 @@
 import type { Category } from "./types.js";
 
+export const categoryValues = [
+  "data-analytics",
+  "system-analytics",
+  "machine-learning",
+  "marketing",
+  "sales",
+  "erp-development",
+  "data-security"
+] as const;
+
 export const categories: Record<Category, string> = {
-  "data-system-ml": "Дата + системная аналитика + ML",
-  "marketing-sales": "Маркетинг + продажи",
+  "data-analytics": "Дата-аналитика",
+  "system-analytics": "Системная аналитика",
+  "machine-learning": "Машинное обучение",
+  "marketing": "Маркетинг",
+  "sales": "Продажи",
   "erp-development": "Разработка ERP",
   "data-security": "Безопасность данных"
+};
+
+export const legacyCategoryMap: Record<string, Category> = {
+  "data-system-ml": "data-analytics",
+  "marketing-sales": "marketing",
+  "erp-development": "erp-development",
+  "data-security": "data-security"
 };
 
 export function todayIso() {

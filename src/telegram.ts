@@ -25,21 +25,30 @@ const inlineMenu = Markup.inlineKeyboard([
   [Markup.button.callback("Привязка Telegram", "link:help")]
 ]);
 
-const appUrl = process.env.FRONTEND_URL || process.env.APP_URL || "https://daily-report-b.vercel.app";
+const appUrl = process.env.FRONTEND_URL || process.env.APP_URL || "https://daily-report-f.vercel.app";
 
 const departmentKeywords: Record<Category, string[]> = {
-  "data-system-ml": ["data", "данн", "аналит", "system", "систем", "ml", "machine", "машин"],
-  "marketing-sales": ["marketing", "маркет", "sales", "продаж"],
+  "data-analytics": ["data", "данн", "аналит", "дашборд", "метрик", "bi"],
+  "system-analytics": ["system", "систем", "требован", "bpmn", "uml", "аналит"],
+  "machine-learning": ["ml", "machine", "машин", "модель", "нейро", "ai"],
+  "marketing": ["marketing", "маркет", "контент", "smm", "instagram"],
+  "sales": ["sales", "продаж", "лид", "ворон"],
   "erp-development": ["erp", "разработ", "dev", "frontend", "backend"],
   "data-security": ["security", "безопас", "защит", "данных"]
 };
 
 const categoryAliases: Record<string, Category> = {
-  data: "data-system-ml",
-  analytics: "data-system-ml",
-  ml: "data-system-ml",
-  marketing: "marketing-sales",
-  sales: "marketing-sales",
+  data: "data-analytics",
+  analytics: "data-analytics",
+  analyst: "data-analytics",
+  system: "system-analytics",
+  systems: "system-analytics",
+  sa: "system-analytics",
+  ml: "machine-learning",
+  ai: "machine-learning",
+  marketing: "marketing",
+  smm: "marketing",
+  sales: "sales",
   erp: "erp-development",
   dev: "erp-development",
   security: "data-security"
@@ -82,6 +91,10 @@ async function replyAccessDenied(ctx: Context, message: string) {
     await ctx.answerCbQuery(message, { show_alert: true });
     return;
   }
+  if (isGroupChat(ctx)) {
+    await replyTemporary(ctx, message, undefined, 700);
+    return;
+  }
   await ctx.reply(message);
 }
 
@@ -102,6 +115,10 @@ async function requireGroupAdmin(ctx: Context) {
     return false;
   }
 
+  const message = ctx.message;
+  const senderChat = message && "sender_chat" in message ? message.sender_chat : undefined;
+  if (senderChat?.id === chat.id) return true;
+
   const member = await ctx.telegram.getChatMember(chat.id, ctx.from.id);
   const allowed = member.status === "administrator" || member.status === "creator";
   if (!allowed) {
@@ -109,6 +126,22 @@ async function requireGroupAdmin(ctx: Context) {
   }
 
   return allowed;
+}
+
+function isPrivateChat(ctx: Context) {
+  return ctx.chat?.type === "private";
+}
+
+async function requirePrivateChat(ctx: Context, message = "Эта команда доступна только в личном чате с ботом.") {
+  if (isPrivateChat(ctx)) return true;
+  if (isCallbackContext(ctx)) {
+    await ctx.answerCbQuery(message, { show_alert: true });
+  } else if (isGroupChat(ctx)) {
+    await replyTemporary(ctx, message, undefined, 800);
+  } else {
+    await ctx.reply(message);
+  }
+  return false;
 }
 
 function scheduleMessageDelete(ctx: Context, messageId: number, delayMs = temporaryGroupMessageTtlMs) {
@@ -192,13 +225,27 @@ function parseCategoryAlias(value?: string) {
 
 function groupDepartmentKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback("ERP", "group:department:erp"), Markup.button.callback("Data / ML", "group:department:data")],
-    [Markup.button.callback("Marketing / Sales", "group:department:marketing"), Markup.button.callback("Security", "group:department:security")]
+    [Markup.button.callback("ERP", "group:department:erp"), Markup.button.callback("Data", "group:department:data")],
+    [Markup.button.callback("System Analytics", "group:department:system"), Markup.button.callback("ML", "group:department:ml")],
+    [Markup.button.callback("Marketing", "group:department:marketing"), Markup.button.callback("Sales", "group:department:sales")],
+    [Markup.button.callback("Security", "group:department:security")]
   ]);
 }
 
 function groupActionsKeyboard(enabled?: boolean) {
   return Markup.inlineKeyboard([
+    [Markup.button.callback("Статус группы", "group:status"), Markup.button.callback("Сменить департамент", "group:department:choose")],
+    [
+      enabled
+        ? Markup.button.callback("Отключить мотивацию", "group:motivation:off")
+        : Markup.button.callback("Включить мотивацию", "group:motivation:on")
+    ]
+  ]);
+}
+
+function groupMenuKeyboard(enabled?: boolean) {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("План группы", "plan:view"), Markup.button.callback("Сводка группы", "summary:view")],
     [Markup.button.callback("Статус группы", "group:status"), Markup.button.callback("Сменить департамент", "group:department:choose")],
     [
       enabled
@@ -252,8 +299,10 @@ function taskKeyboard(stepId: string, status: string) {
 function categoryHelp() {
   return [
     "Департаменты:",
-    "/group_department data",
+    "/group_department system",
+    "/group_department ml",
     "/group_department marketing",
+    "/group_department sales",
     "/group_department erp",
     "/group_department security"
   ].join("\n");
@@ -263,10 +312,6 @@ function getTextFromMessage(ctx: Context) {
   const message = ctx.message;
   if (!message || !("text" in message)) return "";
   return message.text.trim();
-}
-
-function isPrivateChat(ctx: Context) {
-  return ctx.chat?.type === "private";
 }
 
 function buildTelegramName(from: NonNullable<Context["from"]>) {
@@ -802,7 +847,9 @@ async function handleVoiceMessage(ctx: Context) {
 
   if (isGroupChat(ctx)) {
     await trackGroupText(ctx, transcript);
-    await replyTemporary(ctx, `Голосовое распознано и учтено в активности: ${transcript.slice(0, 180)}`, undefined, 7000);
+    await ctx.reply(`Голосовое распознано и учтено в активности:\n${transcript.slice(0, 700)}`, {
+      reply_to_message_id: ctx.message?.message_id
+    } as Parameters<Context["reply"]>[1]);
     return;
   }
 
@@ -813,6 +860,7 @@ async function handleVoiceMessage(ctx: Context) {
 }
 
 async function sendMyTasks(ctx: Context) {
+  if (!(await requirePrivateChat(ctx, "Личные задачи доступны только в личном чате с ботом."))) return;
   const user = await requireLinkedUser(ctx);
   if (!user) return;
   if (!user.category) {
@@ -843,6 +891,7 @@ async function sendMyTasks(ctx: Context) {
 }
 
 async function sendAllPlanSteps(ctx: Context) {
+  if (!(await requirePrivateChat(ctx, "Личные шаги плана доступны только в личном чате с ботом."))) return;
   const user = await requireLinkedUser(ctx);
   if (!user) return;
   if (!user.category) {
@@ -865,6 +914,7 @@ async function sendAllPlanSteps(ctx: Context) {
 }
 
 async function updateTaskStatus(ctx: Context, stepId: string, status: PlanStepStatus) {
+  if (!(await requirePrivateChat(ctx, "Статус личной задачи меняется только в личном чате с ботом."))) return;
   const user = await requireLinkedUser(ctx);
   if (!user?.category) return;
   const plan = await PlanModel.findOne({ category: user.category, ...activePlanFilter }).sort({ createdAt: -1 });
@@ -879,6 +929,7 @@ async function updateTaskStatus(ctx: Context, stepId: string, status: PlanStepSt
 }
 
 async function startDailyWizard(ctx: Context) {
+  if (!(await requirePrivateChat(ctx, "Дэйлик через Telegram доступен только в личном чате с ботом."))) return;
   const user = await requireLinkedUser(ctx);
   if (!user) return;
   if (user.role === "admin") {
@@ -904,6 +955,7 @@ async function startDailyWizard(ctx: Context) {
 }
 
 async function startBlockerWizard(ctx: Context, stepId?: string) {
+  if (!(await requirePrivateChat(ctx, "Блокер по личной задаче лучше отправлять в личном чате с ботом."))) return;
   const user = await requireLinkedUser(ctx);
   if (!user) return;
   await TelegramDraftModel.findOneAndUpdate(
@@ -968,6 +1020,7 @@ async function handleDraftMessage(ctx: Context) {
 }
 
 async function submitDraft(ctx: Context) {
+  if (!(await requirePrivateChat(ctx))) return;
   const draft = await TelegramDraftModel.findOne({ chatId: String(ctx.chat!.id), expiresAt: { $gt: new Date() } });
   if (!draft) {
     await ctx.reply("Черновик не найден или истек. Начните заново.", mainMenuKeyboard());
@@ -993,11 +1046,26 @@ async function submitDraft(ctx: Context) {
 }
 
 async function cancelDraft(ctx: Context) {
+  if (!(await requirePrivateChat(ctx))) return;
   await TelegramDraftModel.deleteOne({ chatId: String(ctx.chat!.id) });
   await ctx.reply("Черновик отменен.", mainMenuKeyboard());
 }
 
 async function sendMainMenu(ctx: Context) {
+  if (isGroupChat(ctx)) {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const group = await TelegramGroupModel.findOne({ chatId: String(ctx.chat!.id) });
+    await replyTemporary(
+      ctx,
+      group?.category
+        ? `Меню группы департамента: ${categories[group.category as Category]}`
+        : "Меню группы. Сначала выберите департамент.",
+      group?.category ? groupMenuKeyboard(group.motivationEnabled) : groupDepartmentKeyboard(),
+      15000
+    );
+    return;
+  }
+
   const user = await syncPrivateTelegramUser(ctx);
   const registerHint =
     user && !user.emailVerified
@@ -1033,10 +1101,12 @@ async function syncPrivateTelegramUser(ctx: Context) {
 }
 
 async function sendLinkHelp(ctx: Context) {
+  if (!(await requirePrivateChat(ctx, "Привязка Telegram доступна только в личном чате с ботом."))) return;
   await ctx.reply("Чтобы привязать Telegram к аккаунту, напишите:\n/link email@example.com", inlineMenu);
 }
 
 async function sendReportHelp(ctx: Context) {
+  if (!(await requirePrivateChat(ctx, "Дэйлик через Telegram доступен только в личном чате с ботом."))) return;
   await ctx.reply(
     [
       "Формат дневного отчета:",
@@ -1125,6 +1195,7 @@ async function sendDigestStatus(ctx: Context) {
 }
 
 async function setDigestFromCallback(ctx: Context, enabled: boolean) {
+  if (!(await requirePrivateChat(ctx, "Автосводка настраивается только в личном чате тимлида с ботом."))) return;
   const user = await getLinkedUser(ctx);
   if (!user || user.role !== "lead") {
     await ctx.reply("Автосводка доступна только привязанному тимлиду.");
@@ -1284,7 +1355,7 @@ bot.start(async (ctx) => {
     await ctx.answerCbQuery();
     await askGroupDepartment(ctx);
   });
-  bot.action(/^group:department:(data|marketing|erp|security)$/, async (ctx) => {
+  bot.action(/^group:department:(data|system|ml|marketing|sales|erp|security)$/, async (ctx) => {
     const category = parseCategoryAlias(ctx.match[1]);
     if (!(await requireGroupAdmin(ctx))) return;
     await ctx.answerCbQuery(category ? "Департамент выбран" : "Неизвестный департамент");
@@ -1388,6 +1459,7 @@ bot.start(async (ctx) => {
   });
 
   bot.command("report", async (ctx) => {
+    if (!(await requirePrivateChat(ctx, "Дэйлик через Telegram доступен только в личном чате с ботом."))) return;
     try {
       const user = await getLinkedUser(ctx);
       if (!user) {

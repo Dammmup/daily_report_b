@@ -67,6 +67,16 @@ attendanceRouter.get("/office-location", auth, async (req: AuthedRequest, res) =
   res.json(serializeOfficeLocation(await OfficeLocationModel.findOne({ category: req.user!.category })));
 });
 
+attendanceRouter.get("/office-locations", auth, async (req: AuthedRequest, res) => {
+  if (req.user!.role !== "admin") {
+    res.status(403).json({ message: "Недостаточно прав" });
+    return;
+  }
+
+  const locations = await OfficeLocationModel.find().sort({ category: 1 });
+  res.json(locations.map(serializeOfficeLocation));
+});
+
 attendanceRouter.put("/office-location", auth, async (req: AuthedRequest, res) => {
   if (req.user!.role !== "lead" && req.user!.role !== "admin") {
     res.status(403).json({ message: "Недостаточно прав" });

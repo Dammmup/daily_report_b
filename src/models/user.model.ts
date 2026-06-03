@@ -1,4 +1,5 @@
 import mongoose, { Schema, type HydratedDocument, type InferSchemaType } from "mongoose";
+import { categoryValues } from "../constants.js";
 
 const userSchema = new Schema(
   {
@@ -8,7 +9,7 @@ const userSchema = new Schema(
     role: { type: String, enum: ["intern", "lead", "admin"], required: true },
     category: {
       type: String,
-      enum: ["data-system-ml", "marketing-sales", "erp-development", "data-security"],
+      enum: categoryValues,
       required: false
     },
     avatarColor: { type: String, required: true },
@@ -31,6 +32,8 @@ const userSchema = new Schema(
     telegramDigestLastSentAt: { type: Date },
     telegramLinkToken: { type: String },
     telegramLinkTokenExpiresAt: { type: Date },
+    lastDepartmentChangedAt: { type: Date },
+    lastDepartmentChangeReason: { type: String },
     passwordHash: { type: String, required: true },
     lastActiveAt: { type: Date, default: Date.now }
   },
