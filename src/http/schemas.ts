@@ -3,6 +3,30 @@ import { categoryValues } from "../constants.js";
 
 export const categorySchema = z.enum(categoryValues);
 
+function splitMilestoneText(text: string) {
+  const normalized = text.replace(/\r/g, "\n").trim();
+  if (!normalized) return [];
+
+  const stageParts = normalized
+    .split(/(?=Этап\s*\d+\s*:)/gi)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (stageParts.length > 1) return stageParts;
+
+  return normalized
+    .split(/\n+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+const milestonesSchema = z.preprocess((value) => {
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => (typeof item === "string" ? splitMilestoneText(item) : item)).filter(Boolean);
+  }
+  if (typeof value === "string") return splitMilestoneText(value);
+  return value;
+}, z.array(z.string().trim().min(1)).min(1));
+
 export const requestCodeSchema = z
   .object({
     email: z.string().email().optional().or(z.literal("")),
@@ -63,7 +87,7 @@ export const surveySchema = z.object({
 export const planSchema = z.object({
   title: z.string().trim().min(5),
   baseDeadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  milestones: z.array(z.string().trim().min(1)).min(2)
+  milestones: milestonesSchema
 });
 
 export const adminPlanSchema = planSchema.extend({
