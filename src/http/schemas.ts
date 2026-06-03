@@ -61,9 +61,9 @@ export const surveySchema = z.object({
 });
 
 export const planSchema = z.object({
-  title: z.string().min(5),
+  title: z.string().trim().min(5),
   baseDeadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  milestones: z.array(z.string()).min(2)
+  milestones: z.array(z.string().trim().min(1)).min(2)
 });
 
 export const adminPlanSchema = planSchema.extend({
@@ -72,10 +72,10 @@ export const adminPlanSchema = planSchema.extend({
   steps: z
     .array(
       z.object({
-        title: z.string().min(3),
-        description: z.string().default(""),
-        technicalSpec: z.string().max(3000).default(""),
-        technicalInstruction: z.string().max(3000).default(""),
+        title: z.string().trim().min(3),
+        description: z.string().trim().default(""),
+        technicalSpec: z.string().trim().max(3000).default(""),
+        technicalInstruction: z.string().trim().max(3000).default(""),
         deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
         assignedTo: z.string().optional().or(z.literal("")),
         status: z.enum(["todo", "in_progress", "done", "canceled"]).default("todo"),

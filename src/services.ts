@@ -281,23 +281,66 @@ export async function formatLeadSummary(category?: Category, content: "productiv
   return [...productivity, ...reports].join("\n");
 }
 
-function textOf(value: unknown, depth = 0): string {
+function textOf(value: unknown, depth = 0, seen = new WeakSet<object>()): string {
   if (depth > 4) return "";
   if (!value) return "";
-  if (Array.isArray(value)) return value.join(" ");
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map((item) => textOf(item, depth + 1, seen)).join(" ");
   if (value instanceof Date) return value.toISOString();
   if (typeof value === "object") {
-    const maybeDocument = value as { toObject?: (options?: unknown) => Record<string, unknown> };
-    const plain = typeof maybeDocument.toObject === "function"
-      ? maybeDocument.toObject({ depopulate: true, flattenMaps: true, versionKey: false })
-      : (value as Record<string, unknown>);
+    if (seen.has(value)) return "";
+    seen.add(value);
 
-    const allowed = Object.fromEntries(
-      Object.entries(plain).filter(([key]) => !key.startsWith("_") && !["schema", "$__", "$isNew", "db", "collection"].includes(key))
-    );
-    return Object.values(allowed).map((item) => textOf(item, depth + 1)).join(" ");
+    const plain = Object.getPrototypeOf(value) === Object.prototype ? (value as Record<string, unknown>) : {};
+    return Object.entries(plain)
+      .filter(([key]) => !key.startsWith("_") && !key.startsWith("$") && !["schema", "db", "collection", "parent", "ownerDocument"].includes(key))
+      .map(([, item]) => textOf(item, depth + 1, seen))
+      .join(" ");
   }
   return String(value);
+}
+
+function surveySearchText(survey?: {
+  answers?: {
+    traits?: string[];
+    skills?: string;
+    experience?: string;
+    learningStyle?: string;
+    goal?: string;
+  } | null;
+  analysis?: {
+    strengths?: string[];
+    weaknesses?: string[];
+    skillsSummary?: string;
+    experienceSummary?: string;
+    goalAlignment?: string;
+    suggestedTrack?: string;
+    mentorFocus?: string[];
+    recommendation?: string;
+    riskLevel?: string;
+  } | null;
+}) {
+  if (!survey) return "";
+  const answers = survey.answers || {};
+  const analysis = survey.analysis || {};
+  return [
+    ...(answers.traits || []),
+    answers.skills,
+    answers.experience,
+    answers.learningStyle,
+    answers.goal,
+    ...(analysis.strengths || []),
+    ...(analysis.weaknesses || []),
+    analysis.skillsSummary,
+    analysis.experienceSummary,
+    analysis.goalAlignment,
+    analysis.suggestedTrack,
+    ...(analysis.mentorFocus || []),
+    analysis.recommendation,
+    analysis.riskLevel
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 function scoreCandidate(planText: string, surveyText: string, averageScore: number, sameDepartment: boolean) {
@@ -340,7 +383,7 @@ export async function buildPlanFitAssistant(input: {
 
   const [interns, surveys, reports] = await Promise.all([
     UserModel.find({ role: "intern" }).sort({ name: 1 }),
-    SurveyModel.find(),
+    SurveyModel.find().lean(),
     ReportModel.find().sort({ createdAt: -1 })
   ]);
 
@@ -351,7 +394,7 @@ export async function buildPlanFitAssistant(input: {
     const scores = userReports.map((report) => report.aiReview?.productivityScore || 0);
     const averageScore = scores.length ? Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length) : 0;
     const sameDepartment = user.category === plan.category;
-    const surveyText = `${textOf(survey?.answers)} ${textOf(survey?.analysis)}`;
+    const surveyText = surveySearchText(survey);
     const score = scoreCandidate(planText, surveyText, averageScore, sameDepartment);
 
     return {
