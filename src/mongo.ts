@@ -97,6 +97,15 @@ function normalizedName(value = "") {
     .replace(/[^a-z0-9]+/g, "");
 }
 
+function normalizedNameTokens(value = "") {
+  return value
+    .toLowerCase()
+    .trim()
+    .split(/\s+/)
+    .map((part) => normalizedName(part))
+    .filter(Boolean);
+}
+
 function levenshtein(a: string, b: string) {
   const dp = Array.from({ length: a.length + 1 }, (_, index) => [index]);
   for (let column = 1; column <= b.length; column += 1) dp[0][column] = column;
@@ -115,7 +124,10 @@ function levenshtein(a: string, b: string) {
 function namesLookSimilar(left: string, right: string) {
   const a = normalizedName(left);
   const b = normalizedName(right);
+  const aTokens = normalizedNameTokens(left);
+  const bTokens = normalizedNameTokens(right);
   if (a.length < 3 || b.length < 3) return false;
+  if (aTokens.length > 1 && bTokens.length > 1 && aTokens.sort().join("") === bTokens.sort().join("")) return true;
   if (a === b || a.includes(b) || b.includes(a)) return true;
   return levenshtein(a, b) <= Math.max(1, Math.floor(Math.max(a.length, b.length) * 0.25));
 }
@@ -198,6 +210,17 @@ async function mergeTelegramShadowUsers() {
       )
     ]);
 
+    await UserModel.updateOne(
+      { _id: shadow._id },
+      {
+        $unset: {
+          telegramUserId: "",
+          telegramUsername: "",
+          telegramChatId: "",
+          telegramLinkToken: ""
+        }
+      }
+    );
     await target.save();
     await UserModel.deleteOne({ _id: shadow._id });
     merged += 1;
