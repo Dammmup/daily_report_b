@@ -22,7 +22,8 @@ assistantRouter.post("/assistant/plan-fit", auth, async (req: AuthedRequest, res
       await buildPlanFitAssistant({
         requester: req.user!,
         question: body.data.question,
-        planId: body.data.planId
+        planId: body.data.planId,
+        stepId: body.data.stepId
       })
     );
   } catch (error) {

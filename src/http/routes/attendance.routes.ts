@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { todayIso } from "../../constants.js";
+import { categoryValues, todayIso } from "../../constants.js";
 import { AttendanceModel, OfficeLocationModel } from "../../models.js";
 import type { Category } from "../../types.js";
 import { auth, type AuthedRequest } from "../middleware/auth.js";
@@ -32,9 +32,20 @@ function serializeAttendance(item: Awaited<ReturnType<typeof AttendanceModel.fin
   return { ...raw, id: item.id, userId: raw.userId.toString() };
 }
 
-function serializeOfficeLocation(item: Awaited<ReturnType<typeof OfficeLocationModel.findOne>>) {
+type OfficeLocationDocument = NonNullable<Awaited<ReturnType<typeof OfficeLocationModel.findOne>>>;
+
+function serializeOfficeLocation(item: OfficeLocationDocument | null) {
   if (!item) return null;
   return { ...item.toObject(), id: item.id };
+}
+
+async function findOfficeLocation(category?: Category | null): Promise<OfficeLocationDocument | null> {
+  if (category) {
+    const location = await OfficeLocationModel.findOne({ category });
+    if (location) return location;
+  }
+
+  return await OfficeLocationModel.findOne().sort({ updatedAt: -1 });
 }
 
 attendanceRouter.get("/summary", auth, async (req: AuthedRequest, res) => {
@@ -43,7 +54,7 @@ attendanceRouter.get("/summary", auth, async (req: AuthedRequest, res) => {
     return;
   }
 
-  const officeLocation = await OfficeLocationModel.findOne({ category: req.user!.category });
+  const officeLocation = await findOfficeLocation(req.user!.category);
   const weekStart = getWeekStart();
   const attendance = await AttendanceModel.find({ userId: req.user!._id, date: { $gte: weekStart } }).sort({ date: -1 });
   const verifiedDays = new Set(attendance.filter((item) => item.locationStatus === "verified").map((item) => item.date));
@@ -60,11 +71,16 @@ attendanceRouter.get("/summary", auth, async (req: AuthedRequest, res) => {
 });
 
 attendanceRouter.get("/office-location", auth, async (req: AuthedRequest, res) => {
-  if (!req.user!.category) {
-    res.json(null);
+  res.json(serializeOfficeLocation(await findOfficeLocation(req.user!.category)));
+});
+
+attendanceRouter.get("/office-location/global", auth, async (req: AuthedRequest, res) => {
+  if (req.user!.role !== "lead" && req.user!.role !== "admin") {
+    res.status(403).json({ message: "Недостаточно прав" });
     return;
   }
-  res.json(serializeOfficeLocation(await OfficeLocationModel.findOne({ category: req.user!.category })));
+
+  res.json(serializeOfficeLocation(await findOfficeLocation(req.user!.category)));
 });
 
 attendanceRouter.get("/office-locations", auth, async (req: AuthedRequest, res) => {
@@ -111,6 +127,38 @@ attendanceRouter.put("/office-location", auth, async (req: AuthedRequest, res) =
   res.json(serializeOfficeLocation(location));
 });
 
+attendanceRouter.put("/office-location/global", auth, async (req: AuthedRequest, res) => {
+  if (req.user!.role !== "lead" && req.user!.role !== "admin") {
+    res.status(403).json({ message: "Недостаточно прав" });
+    return;
+  }
+
+  const body = officeLocationSchema.safeParse(req.body);
+  if (!body.success) {
+    res.status(400).json({ message: "Некорректные координаты офиса" });
+    return;
+  }
+
+  const updates = await Promise.all(
+    categoryValues.map((category) =>
+      OfficeLocationModel.findOneAndUpdate(
+        { category },
+        {
+          category,
+          latitude: body.data.latitude,
+          longitude: body.data.longitude,
+          radiusMeters: body.data.radiusMeters,
+          minWeeklyOfficeDays: body.data.minWeeklyOfficeDays,
+          updatedBy: req.user!._id
+        },
+        { upsert: true, returnDocument: "after" }
+      )
+    )
+  );
+
+  res.json(serializeOfficeLocation(updates[0] || null));
+});
+
 attendanceRouter.post("/check-in", auth, async (req: AuthedRequest, res) => {
   const body = attendanceSchema.safeParse(req.body);
   if (!body.success) {
@@ -118,7 +166,7 @@ attendanceRouter.post("/check-in", auth, async (req: AuthedRequest, res) => {
     return;
   }
 
-  const officeLocation = req.user!.category ? await OfficeLocationModel.findOne({ category: req.user!.category }) : null;
+  const officeLocation = req.user!.category ? await findOfficeLocation(req.user!.category) : null;
   const hasCoordinates = typeof body.data.latitude === "number" && typeof body.data.longitude === "number";
   if (officeLocation && !hasCoordinates) {
     res.status(400).json({ message: "Для офисной отметки нужны координаты устройства" });

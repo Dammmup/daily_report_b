@@ -150,7 +150,8 @@ export const telegramMiniAppSessionSchema = z.object({
 
 export const assistantPlanFitSchema = z.object({
   question: z.string().min(5).max(1200),
-  planId: z.string().optional()
+  planId: z.string().optional(),
+  stepId: z.string().optional()
 });
 
 export const assignmentApplySchema = z.object({

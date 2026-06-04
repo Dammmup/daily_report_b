@@ -148,6 +148,14 @@ export type PlanFitCandidate = {
   reportsCount: number;
 };
 
+export type PlanFitTarget =
+  | { type: "plan" }
+  | {
+      type: "step";
+      stepId: string;
+      stepTitle: string;
+    };
+
 export type AssignmentDraftItem = {
   stepId: string;
   stepTitle: string;

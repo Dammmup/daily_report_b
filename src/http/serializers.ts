@@ -57,6 +57,7 @@ export function serializePlan(plan: PlanDocument | null) {
     ...item,
     id: plan.id,
     leadId: item.leadId?.toString(),
+    categoryLabel: categories[item.category as Category],
     steps: (item.steps || []).map((step) => ({
       ...step,
       id: step._id.toString(),

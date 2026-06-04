@@ -616,14 +616,17 @@ export async function buildPlanFitAssistant(input: {
   requester: UserDocument;
   question: string;
   planId?: string;
+  stepId?: string;
   skipAi?: boolean;
 }) {
   const plan =
     input.planId && input.requester.role === "admin"
       ? await PlanModel.findById(input.planId)
-      : input.requester.category
-        ? await PlanModel.findOne({ category: input.requester.category, ...activePlanFilter }).sort({ createdAt: -1 })
-        : null;
+      : input.planId && input.requester.category
+        ? await PlanModel.findOne({ _id: input.planId, category: input.requester.category, ...activePlanFilter } as any)
+        : input.requester.category
+          ? await PlanModel.findOne({ category: input.requester.category, ...activePlanFilter }).sort({ createdAt: -1 })
+          : null;
 
   if (!plan) {
     return {
@@ -634,13 +637,16 @@ export async function buildPlanFitAssistant(input: {
     };
   }
 
+  const selectedStep = input.stepId ? plan.steps.id(input.stepId) : null;
   const [interns, surveys] = await Promise.all([
     UserModel.find({ role: "intern" }).sort({ name: 1 }),
     SurveyModel.find().lean()
   ]);
   const reports = interns.length ? await ReportModel.find({ userId: { $in: interns.map((user) => user._id) } }).sort({ createdAt: -1 }) : [];
 
-  const planText = `${plan.title} ${plan.milestones.join(" ")} ${plan.aiRationale}`;
+  const planText = selectedStep
+    ? `${selectedStep.title} ${selectedStep.description || ""} ${selectedStep.technicalSpec || ""} ${selectedStep.technicalInstruction || ""} ${selectedStep.deadline || ""}`
+    : `${plan.title} ${plan.milestones.join(" ")} ${plan.aiRationale}`;
   const rows = interns.map((user) => {
     const survey = surveys.find((item) => item.userId.toString() === user.id);
     const userReports = reports.filter((report) => report.userId.toString() === user.id);
@@ -711,6 +717,7 @@ export async function buildPlanFitAssistant(input: {
 Департамент: ${categories[plan.category as Category]}
 Дедлайн: ${plan.adjustedDeadline}
 Этапы: ${plan.milestones.join("; ")}
+${selectedStep ? `\nВыбранная задача:\n${selectedStep.title}\n${selectedStep.description || ""}\nТЗ: ${selectedStep.technicalSpec || "не указано"}\nИнструкция: ${selectedStep.technicalInstruction || "не указано"}\nДедлайн: ${selectedStep.deadline}` : ""}
 
 Кандидаты, выбранные системой по AI-профилям миниопроса:
 ${context || "Кандидатов нет"}
@@ -740,6 +747,13 @@ ${context || "Кандидатов нет"}
       adjustedDeadline: plan.adjustedDeadline,
       milestones: plan.milestones
     },
+    target: selectedStep
+      ? {
+          type: "step" as const,
+          stepId: selectedStep._id.toString(),
+          stepTitle: selectedStep.title
+        }
+      : { type: "plan" as const },
     candidates,
     fallbackUsed
   };
