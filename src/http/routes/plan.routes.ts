@@ -386,6 +386,94 @@ planRouter.patch("/department-plan/steps/:stepId", auth, requireRole("lead", "ad
   res.json(serializePlan(plan));
 });
 
+planRouter.post("/department-plan/steps/:stepId/claim", auth, requireRole("intern"), async (req: AuthedRequest, res) => {
+  if (!req.user!.category) {
+    res.status(400).json({ message: "Сначала выберите департамент" });
+    return;
+  }
+
+  const plan = await PlanModel.findOne({ ...activePlanQuery(req.user!.category), "steps._id": req.params.stepId } as any).sort({ createdAt: -1 });
+  const step = plan?.steps.id(String(req.params.stepId));
+  if (!plan || !step) {
+    res.status(404).json({ message: "Шаг не найден" });
+    return;
+  }
+
+  if (step.status === "done" || step.status === "canceled") {
+    res.status(400).json({ message: "Этот шаг уже закрыт" });
+    return;
+  }
+
+  if (step.assignedTo && step.assignedTo.toString() !== req.user!.id) {
+    res.status(409).json({ message: "Шаг уже назначен другому стажеру" });
+    return;
+  }
+
+  step.assignedTo = req.user!._id as any;
+  if (step.status === "todo") step.status = "in_progress";
+  await plan.save();
+
+  await notifyPlanChangeSafely({
+    planId: plan.id,
+    category: plan.category as Category,
+    actorId: req.user!.id,
+    type: "step_assigned",
+    title: "Стажер взял шаг в работу",
+    summary: `${req.user!.name} взял(а) шаг "${step.title}" по плану "${plan.title}". Дедлайн: ${step.deadline}.`,
+    stepId: step._id.toString()
+  });
+
+  await AuditLogModel.create({
+    actorId: req.user!._id,
+    action: "step_claimed",
+    entityType: "plan_step",
+    entityId: step._id.toString(),
+    category: plan.category,
+    message: `Стажер взял шаг "${step.title}" в плане "${plan.title}"`
+  });
+
+  res.json(serializePlan(plan));
+});
+
+planRouter.patch("/department-plan/steps/:stepId/my-status", auth, requireRole("intern"), async (req: AuthedRequest, res) => {
+  const status = String(req.body?.status || "");
+  if (!["todo", "in_progress", "done", "canceled"].includes(status)) {
+    res.status(400).json({ message: "Некорректный статус шага" });
+    return;
+  }
+
+  if (!req.user!.category) {
+    res.status(400).json({ message: "Сначала выберите департамент" });
+    return;
+  }
+
+  const plan = await PlanModel.findOne({ ...activePlanQuery(req.user!.category), "steps._id": req.params.stepId } as any).sort({ createdAt: -1 });
+  const step = plan?.steps.id(String(req.params.stepId));
+  if (!plan || !step) {
+    res.status(404).json({ message: "Шаг не найден" });
+    return;
+  }
+
+  if (step.assignedTo?.toString() !== req.user!.id) {
+    res.status(403).json({ message: "Можно менять статус только своего шага" });
+    return;
+  }
+
+  step.status = status as any;
+  await plan.save();
+
+  await AuditLogModel.create({
+    actorId: req.user!._id,
+    action: "step_status_updated",
+    entityType: "plan_step",
+    entityId: step._id.toString(),
+    category: plan.category,
+    message: `Стажер обновил статус шага "${step.title}": ${status}`
+  });
+
+  res.json(serializePlan(plan));
+});
+
 async function findVisiblePlanStep(req: AuthedRequest, stepId: string) {
   const query = req.user!.role === "admin" ? {} : req.user!.category ? { category: req.user!.category } : null;
   if (!query) return { plan: null, step: null };
