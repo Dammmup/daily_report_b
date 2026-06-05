@@ -137,6 +137,44 @@ async function deactivateGroupAfterSendError(chatId: string, error: unknown) {
   await deactivateTelegramGroup(chatId, error);
 }
 
+async function findDepartmentTelegramGroups(category: Category | string, options: { motivationOnly?: boolean } = {}) {
+  const groups = await TelegramGroupModel.find(
+    activeGroupQuery({
+      category,
+      chatId: { $type: "string", $ne: "" }
+    })
+  ).sort({ isPrimary: -1, lastActivityAt: -1 });
+  const primary = groups.find((group) => group.isPrimary);
+  const targets = primary ? [primary] : groups;
+  return options.motivationOnly ? targets.filter((group) => group.motivationEnabled) : targets;
+}
+
+async function findAllDepartmentTelegramGroups(options: { motivationOnly?: boolean } = {}) {
+  const groups = await TelegramGroupModel.find(
+    activeGroupQuery({
+      category: { $exists: true },
+      chatId: { $type: "string", $ne: "" }
+    })
+  ).sort({ category: 1, isPrimary: -1, lastActivityAt: -1 });
+  const byCategory = new Map<string, typeof groups>();
+  for (const group of groups) {
+    if (!group.category) continue;
+    const key = String(group.category);
+    byCategory.set(key, [...(byCategory.get(key) || []), group]);
+  }
+
+  return Array.from(byCategory.values()).flatMap((items) => {
+    const primary = items.find((group) => group.isPrimary);
+    const targets = primary ? [primary] : items;
+    return options.motivationOnly ? targets.filter((group) => group.motivationEnabled) : targets;
+  });
+}
+
+async function shouldUseGroupForDepartmentAnalytics(chatId: string, category: Category | string) {
+  const targets = await findDepartmentTelegramGroups(category);
+  return !targets.length || targets.some((group) => group.chatId === chatId);
+}
+
 function isCallbackContext(ctx: Context) {
   return Boolean("callbackQuery" in ctx.update && ctx.update.callbackQuery);
 }
@@ -474,6 +512,7 @@ async function trackGroupText(ctx: Context, text: string) {
     },
     { upsert: true, returnDocument: "after" }
   );
+  if (!(await shouldUseGroupForDepartmentAnalytics(chatId, category))) return;
 
   let user = await UserModel.findOne({ telegramUserId });
   if (!user && username) user = await UserModel.findOne({ telegramUsername: username });
@@ -557,6 +596,10 @@ async function answerGroupQuestion(ctx: Context, text: string) {
     } as Parameters<Context["reply"]>[1]);
     return true;
   }
+  if (!(await shouldUseGroupForDepartmentAnalytics(String(ctx.chat!.id), category))) {
+    await replyTemporary(ctx, "Этот чат не выбран основным для департамента. Аналитика и AI-ответы идут из основного чата.", undefined, 12000);
+    return true;
+  }
 
   const [plans, interns, reports] = await Promise.all([
     findActivePlans(category, 5),
@@ -614,6 +657,7 @@ async function trackNewGroupMembers(ctx: Context) {
     },
     { upsert: true, returnDocument: "after" }
   );
+  if (category && !(await shouldUseGroupForDepartmentAnalytics(chatId, category))) return;
 
   let created = 0;
   for (const member of message.new_chat_members) {
@@ -883,11 +927,7 @@ export async function sendWeekdayGroupMotivation() {
   if (weekday === 0 || weekday === 6) return { sent: 0, skipped: "weekend" };
 
   const dayKey = now.toISOString().slice(0, 10);
-  const groups = await TelegramGroupModel.find(activeGroupQuery({
-    category: { $exists: true },
-    motivationEnabled: true,
-    chatId: { $type: "string", $ne: "" }
-  }));
+  const groups = await findAllDepartmentTelegramGroups({ motivationOnly: true });
 
   let sent = 0;
   for (const group of groups) {
@@ -990,11 +1030,7 @@ export async function sendWeekdayGroupDailyDigests() {
   if (!bot) throw new Error("Telegram bot is not configured");
   if (!isWeekdayUtc()) return { sent: 0, skipped: "weekend" };
 
-  const groups = await TelegramGroupModel.find(activeGroupQuery({
-    category: { $exists: true },
-    motivationEnabled: true,
-    chatId: { $type: "string", $ne: "" }
-  }));
+  const groups = await findAllDepartmentTelegramGroups({ motivationOnly: true });
 
   let sent = 0;
   for (const group of groups) {
@@ -1160,10 +1196,7 @@ export async function notifyDepartmentPlanChange(input: {
     [Markup.button.webApp("Открыть приложение", appUrl)]
   ]);
 
-  const groups = await TelegramGroupModel.find(activeGroupQuery({
-    category: input.category,
-    chatId: { $type: "string", $ne: "" }
-  }));
+  const groups = await findDepartmentTelegramGroups(input.category);
 
   const groupMessage = [
     input.type === "plan_created" ? "В департаменте опубликован новый план." : "План департамента обновлен.",
@@ -1205,10 +1238,7 @@ export async function sendTelegramRecoveryBroadcast() {
   const bot = getTelegramBot();
   if (!bot) throw new Error("Telegram bot is not configured");
 
-  const groups = await TelegramGroupModel.find(activeGroupQuery({
-    category: { $exists: true },
-    chatId: { $type: "string", $ne: "" }
-  }));
+  const groups = await findAllDepartmentTelegramGroups();
 
   let motivationMessages = 0;
   for (const group of groups) {

@@ -1,7 +1,8 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
 import { signToken, verifyTelegramInitData } from "../../auth.js";
-import { UserModel } from "../../models.js";
+import { categories } from "../../constants.js";
+import { TelegramGroupModel, UserModel } from "../../models.js";
 import {
   handleTelegramWebhook,
   sendTelegramProductivityAutomation,
@@ -10,6 +11,7 @@ import {
   sendWeekdayPersonalFocus,
   sendWeekdayReportReminders
 } from "../../telegram.js";
+import type { Category } from "../../types.js";
 import { auth, requireRole, type AuthedRequest } from "../middleware/auth.js";
 import { telegramDigestSchema, telegramMiniAppSessionSchema } from "../schemas.js";
 import { publicUser } from "../serializers.js";
@@ -23,6 +25,29 @@ function backendBaseUrl(req: Request) {
   if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL.replace(/\/$/, "")}`;
   const proto = req.header("x-forwarded-proto") || req.protocol || "https";
   return `${proto}://${req.get("host")}`;
+}
+
+function serializeTelegramGroup(group: Awaited<ReturnType<typeof TelegramGroupModel.findOne>>) {
+  if (!group) return null;
+  return {
+    id: group.id,
+    chatId: group.chatId,
+    title: group.title,
+    category: group.category || undefined,
+    categoryLabel: group.category ? categories[group.category as Category] : undefined,
+    active: group.active !== false,
+    isPrimary: Boolean(group.isPrimary),
+    membersSeen: group.membersSeen || 0,
+    motivationEnabled: Boolean(group.motivationEnabled),
+    lastActivityAt: group.lastActivityAt?.toISOString(),
+    createdAt: group.createdAt.toISOString(),
+    updatedAt: group.updatedAt.toISOString()
+  };
+}
+
+function telegramGroupScope(req: AuthedRequest) {
+  if (req.user!.role === "admin") return {};
+  return req.user!.category ? { category: req.user!.category } : null;
 }
 
 telegramRouter.post("/telegram/mini-app-session", async (req, res) => {
@@ -79,6 +104,47 @@ telegramRouter.patch("/telegram/digest", auth, requireRole("lead"), async (req: 
   await req.user!.save();
 
   res.json({ user: publicUser(req.user!) });
+});
+
+telegramRouter.get("/telegram/groups", auth, requireRole("lead", "admin"), async (req: AuthedRequest, res) => {
+  const scope = telegramGroupScope(req);
+  if (!scope) {
+    res.json([]);
+    return;
+  }
+
+  const groups = await TelegramGroupModel.find(scope).sort({ category: 1, active: -1, isPrimary: -1, lastActivityAt: -1, createdAt: -1 });
+  res.json(groups.map(serializeTelegramGroup));
+});
+
+telegramRouter.post("/telegram/groups/:id/primary", auth, requireRole("lead", "admin"), async (req: AuthedRequest, res) => {
+  const scope = telegramGroupScope(req);
+  if (!scope) {
+    res.status(400).json({ message: "Сначала выберите департамент" });
+    return;
+  }
+
+  const group = await TelegramGroupModel.findOne({ _id: req.params.id, ...scope });
+  if (!group) {
+    res.status(404).json({ message: "Telegram-чат не найден" });
+    return;
+  }
+  if (!group.category) {
+    res.status(400).json({ message: "Сначала привяжите чат к департаменту" });
+    return;
+  }
+  if (group.active === false) {
+    res.status(400).json({ message: "Нельзя выбрать неактивный чат основным. Добавьте бота обратно в чат." });
+    return;
+  }
+
+  await TelegramGroupModel.updateMany({ category: group.category, _id: { $ne: group._id } }, { $set: { isPrimary: false } });
+  group.isPrimary = true;
+  group.active = true;
+  group.lastActivityAt = new Date();
+  await group.save();
+
+  res.json(serializeTelegramGroup(group));
 });
 
 telegramRouter.post("/telegram/webhook", async (req, res, next) => {
