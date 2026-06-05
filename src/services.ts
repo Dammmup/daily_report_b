@@ -44,7 +44,17 @@ export function publicUser(user: UserDocument) {
     firstLoginCompleted: user.firstLoginCompleted,
     emailVerified: user.emailVerified,
     telegramLinked: Boolean(user.telegramChatId),
-    lastActiveAt: user.lastActiveAt.toISOString()
+    telegramUserId: user.telegramUserId || undefined,
+    telegramUsername: user.telegramUsername || undefined,
+    registrationSource: user.registrationSource || undefined,
+    registrationReferrer: user.registrationReferrer || undefined,
+    registrationUtmSource: user.registrationUtmSource || undefined,
+    registrationUtmMedium: user.registrationUtmMedium || undefined,
+    registrationUtmCampaign: user.registrationUtmCampaign || undefined,
+    registrationSocialSource: user.registrationSocialSource || undefined,
+    lastActiveAt: user.lastActiveAt.toISOString(),
+    createdAt: user.createdAt.toISOString(),
+    updatedAt: user.updatedAt.toISOString()
   };
 }
 

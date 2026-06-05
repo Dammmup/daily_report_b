@@ -11,6 +11,7 @@ const telegramGroupSchema = new Schema(
       required: false
     },
     membersSeen: { type: Number, default: 0 },
+    active: { type: Boolean, default: true, index: true },
     motivationEnabled: { type: Boolean, default: true },
     motivationLastSentAt: { type: Date },
     groupDigestLastSentAt: { type: Date },
@@ -20,7 +21,7 @@ const telegramGroupSchema = new Schema(
   { timestamps: true }
 );
 
-telegramGroupSchema.index({ category: 1, motivationEnabled: 1 });
+telegramGroupSchema.index({ category: 1, active: 1, motivationEnabled: 1 });
 telegramGroupSchema.index({ category: 1, groupDigestLastSentAt: 1 });
 telegramGroupSchema.index({ category: 1, dailyReminderLastSentAt: 1 });
 

@@ -7,7 +7,7 @@ import { notifyDepartmentPlanChange } from "../../telegram.js";
 import type { Category } from "../../types.js";
 import { buildAssignmentDraft } from "../../services.js";
 import { auth, requireRole, type AuthedRequest } from "../middleware/auth.js";
-import { assignmentApplySchema, planSchema, planStepCreateSchema, planStepUpdateSchema, stepArtifactSchema, stepCommentSchema } from "../schemas.js";
+import { assignmentApplySchema, planBulkAssignSchema, planSchema, planStepCreateSchema, planStepUpdateSchema, stepArtifactSchema, stepCommentSchema } from "../schemas.js";
 import { publicUser, serializePlan } from "../serializers.js";
 
 export const planRouter = Router();
@@ -29,6 +29,15 @@ async function findManageablePlan(req: AuthedRequest, planId: string) {
   if (req.user!.role === "admin") return PlanModel.findById(planId);
   if (!req.user!.category) return null;
   return PlanModel.findOne({ _id: planId, category: req.user!.category });
+}
+
+async function findPlanAssignee(userId: string, category: Category | string) {
+  if (!Types.ObjectId.isValid(userId)) return null;
+  return UserModel.findOne({ _id: new Types.ObjectId(userId), role: { $in: ["intern", "lead"] }, category: category as Category });
+}
+
+function assigneeRoleLabel(role: string) {
+  return role === "lead" ? "тимлиду" : "стажеру";
 }
 
 planRouter.get("/my-plan", auth, async (req: AuthedRequest, res) => {
@@ -258,6 +267,66 @@ planRouter.post("/department-plan/:planId/assignments/apply", auth, requireRole(
   });
 });
 
+planRouter.post("/department-plan/:planId/assign-all", auth, requireRole("lead", "admin"), async (req: AuthedRequest, res) => {
+  const body = planBulkAssignSchema.safeParse(req.body);
+  if (!body.success) {
+    res.status(400).json({ message: "Некорректный исполнитель плана" });
+    return;
+  }
+
+  const plan = await findManageablePlan(req, String(req.params.planId));
+  if (!plan) {
+    res.status(404).json({ message: "План не найден или недоступен" });
+    return;
+  }
+
+  if (plan.status === "completed" || plan.status === "archived") {
+    res.status(400).json({ message: "Нельзя назначать завершенный или архивный план" });
+    return;
+  }
+
+  if (!plan.steps.length) {
+    res.status(400).json({ message: "В плане пока нет шагов для назначения" });
+    return;
+  }
+
+  const assignee = await findPlanAssignee(body.data.assignedTo, plan.category);
+  if (!assignee) {
+    res.status(400).json({ message: "Исполнитель должен быть стажером или тимлидом из департамента плана" });
+    return;
+  }
+
+  const beforeAssignedTo = plan.steps.map((step) => ({ stepId: step._id.toString(), assignedTo: step.assignedTo?.toString() }));
+  const assigneeId = assignee._id.toString();
+  const assignedTo = new Types.ObjectId(assigneeId);
+  plan.steps.forEach((step) => {
+    step.assignedTo = assignedTo;
+  });
+  await plan.save();
+
+  await notifyPlanChangeSafely({
+    planId: plan.id,
+    category: plan.category as Category,
+    actorId: req.user!.id,
+    type: "step_assigned",
+    title: "План назначен одному исполнителю",
+    summary: `Все ${plan.steps.length} шагов плана "${plan.title}" назначены ${assigneeRoleLabel(assignee.role)} ${assignee.name}.`,
+    stepId: plan.steps[0]?._id.toString()
+  });
+
+  await AuditLogModel.create({
+    actorId: req.user!._id,
+    action: "plan_assigned",
+    entityType: "plan",
+    entityId: plan.id,
+    category: plan.category,
+    message: `План "${plan.title}" полностью назначен ${assignee.name}`,
+    meta: { assignedTo: assigneeId, assignedRole: assignee.role, steps: plan.steps.length, beforeAssignedTo }
+  });
+
+  res.json(serializePlan(plan));
+});
+
 planRouter.post(["/department-plan/steps", "/department-plan/:planId/steps"], auth, requireRole("lead"), async (req: AuthedRequest, res) => {
   const body = planStepCreateSchema.safeParse(req.body);
   if (!body.success) {
@@ -278,9 +347,9 @@ planRouter.post(["/department-plan/steps", "/department-plan/:planId/steps"], au
   }
 
   if (body.data.assignedTo) {
-    const assignee = await UserModel.findOne({ _id: body.data.assignedTo, role: "intern", category: req.user!.category });
+    const assignee = await findPlanAssignee(body.data.assignedTo, plan.category);
     if (!assignee) {
-      res.status(400).json({ message: "Стажер должен быть из вашего департамента" });
+      res.status(400).json({ message: "Исполнитель должен быть стажером или тимлидом из вашего департамента" });
       return;
     }
   }
@@ -303,7 +372,7 @@ planRouter.post(["/department-plan/steps", "/department-plan/:planId/steps"], au
     actorId: req.user!.id,
     type: body.data.assignedTo ? "step_assigned" : "step_added",
     title: body.data.assignedTo ? "Назначен новый шаг" : "Добавлен новый шаг",
-    summary: `Шаг: ${addedStep.title}. Дедлайн: ${addedStep.deadline}.${body.data.assignedTo ? " Шаг назначен стажеру." : ""}`,
+    summary: `Шаг: ${addedStep.title}. Дедлайн: ${addedStep.deadline}.${body.data.assignedTo ? " Шаг назначен исполнителю." : ""}`,
     stepId: addedStep._id.toString()
   });
 
@@ -345,9 +414,9 @@ planRouter.patch("/department-plan/steps/:stepId", auth, requireRole("lead", "ad
   };
 
   if (body.data.assignedTo) {
-    const assignee = await UserModel.findOne({ _id: body.data.assignedTo, role: "intern", category: plan.category });
+    const assignee = await findPlanAssignee(body.data.assignedTo, plan.category);
     if (!assignee) {
-      res.status(400).json({ message: "Стажер должен быть из департамента плана" });
+      res.status(400).json({ message: "Исполнитель должен быть стажером или тимлидом из департамента плана" });
       return;
     }
   }

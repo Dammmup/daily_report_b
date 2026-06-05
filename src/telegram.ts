@@ -96,6 +96,47 @@ function isGroupChat(ctx: Context) {
   return ctx.chat?.type === "group" || ctx.chat?.type === "supergroup";
 }
 
+function activeGroupQuery(query: Record<string, unknown> = {}) {
+  return { ...query, active: { $ne: false } };
+}
+
+function isTelegramInactiveChatError(error: unknown) {
+  const message = error instanceof Error ? error.message : JSON.stringify(error);
+  return /bot was kicked|bot was blocked|chat not found|forbidden|not enough rights|deactivated/i.test(message);
+}
+
+async function deactivateTelegramGroup(chatId: string, error?: unknown) {
+  await TelegramGroupModel.updateOne(
+    { chatId },
+    {
+      $set: {
+        active: false,
+        lastActivityAt: new Date()
+      }
+    }
+  );
+  if (error) console.warn(`Telegram group ${chatId} marked inactive`, error);
+}
+
+async function markTelegramGroupActive(chatId: string, title?: string, category?: Category) {
+  await TelegramGroupModel.findOneAndUpdate(
+    { chatId },
+    {
+      chatId,
+      ...(title ? { title } : {}),
+      ...(category ? { category } : {}),
+      active: true,
+      lastActivityAt: new Date()
+    },
+    { upsert: true }
+  );
+}
+
+async function deactivateGroupAfterSendError(chatId: string, error: unknown) {
+  if (!isTelegramInactiveChatError(error)) return;
+  await deactivateTelegramGroup(chatId, error);
+}
+
 function isCallbackContext(ctx: Context) {
   return Boolean("callbackQuery" in ctx.update && ctx.update.callbackQuery);
 }
@@ -428,6 +469,7 @@ async function trackGroupText(ctx: Context, text: string) {
       chatId,
       title,
       category,
+      active: true,
       lastActivityAt: now
     },
     { upsert: true, returnDocument: "after" }
@@ -567,6 +609,7 @@ async function trackNewGroupMembers(ctx: Context) {
       chatId,
       title,
       ...(category ? { category } : {}),
+      active: true,
       lastActivityAt: new Date()
     },
     { upsert: true, returnDocument: "after" }
@@ -620,6 +663,30 @@ async function trackNewGroupMembers(ctx: Context) {
   );
 }
 
+async function handleBotChatMemberUpdate(ctx: Context) {
+  const update = ctx.update as {
+    my_chat_member?: {
+      chat?: { id: number | string; type?: string; title?: string };
+      new_chat_member?: { status?: string };
+    };
+  };
+  const event = update.my_chat_member;
+  const chat = event?.chat;
+  if (!chat || (chat.type !== "group" && chat.type !== "supergroup")) return;
+
+  const chatId = String(chat.id);
+  const title = chat.title || "Telegram group";
+  const status = event?.new_chat_member?.status;
+  if (status === "left" || status === "kicked") {
+    await deactivateTelegramGroup(chatId);
+    return;
+  }
+
+  if (status === "member" || status === "administrator") {
+    await markTelegramGroupActive(chatId, title, detectCategoryFromGroupTitle(title));
+  }
+}
+
 async function applyGroupDepartment(ctx: Context, category: Category) {
   if (!(await requireGroupAdmin(ctx))) return;
   deleteIncomingMessageLater(ctx);
@@ -637,6 +704,7 @@ async function applyGroupDepartment(ctx: Context, category: Category) {
       chatId: String(ctx.chat.id),
       title,
       category,
+      active: true,
       lastActivityAt: new Date()
     },
     { upsert: true, returnDocument: "after" }
@@ -668,6 +736,7 @@ async function setGroupDepartment(ctx: Context) {
       chatId: String(ctx.chat.id),
       title,
       category,
+      active: true,
       lastActivityAt: new Date()
     },
     { upsert: true, returnDocument: "after" }
@@ -723,6 +792,7 @@ async function setGroupMotivation(ctx: Context, enabled: boolean) {
       chatId: String(ctx.chat.id),
       title,
       ...(category ? { category } : {}),
+      active: true,
       motivationEnabled: enabled
     },
     { upsert: true, returnDocument: "after" }
@@ -813,11 +883,11 @@ export async function sendWeekdayGroupMotivation() {
   if (weekday === 0 || weekday === 6) return { sent: 0, skipped: "weekend" };
 
   const dayKey = now.toISOString().slice(0, 10);
-  const groups = await TelegramGroupModel.find({
+  const groups = await TelegramGroupModel.find(activeGroupQuery({
     category: { $exists: true },
     motivationEnabled: true,
     chatId: { $type: "string", $ne: "" }
-  });
+  }));
 
   let sent = 0;
   for (const group of groups) {
@@ -838,6 +908,7 @@ export async function sendWeekdayGroupMotivation() {
       sent += 1;
     } catch (error) {
       console.error("Telegram weekday motivation error", error);
+      if (group.chatId) await deactivateGroupAfterSendError(group.chatId, error);
     }
   }
 
@@ -919,11 +990,11 @@ export async function sendWeekdayGroupDailyDigests() {
   if (!bot) throw new Error("Telegram bot is not configured");
   if (!isWeekdayUtc()) return { sent: 0, skipped: "weekend" };
 
-  const groups = await TelegramGroupModel.find({
+  const groups = await TelegramGroupModel.find(activeGroupQuery({
     category: { $exists: true },
     motivationEnabled: true,
     chatId: { $type: "string", $ne: "" }
-  });
+  }));
 
   let sent = 0;
   for (const group of groups) {
@@ -935,6 +1006,7 @@ export async function sendWeekdayGroupDailyDigests() {
       sent += 1;
     } catch (error) {
       console.error("Telegram group digest error", error);
+      if (group.chatId) await deactivateGroupAfterSendError(group.chatId, error);
     }
   }
 
@@ -1088,10 +1160,10 @@ export async function notifyDepartmentPlanChange(input: {
     [Markup.button.webApp("Открыть приложение", appUrl)]
   ]);
 
-  const groups = await TelegramGroupModel.find({
+  const groups = await TelegramGroupModel.find(activeGroupQuery({
     category: input.category,
     chatId: { $type: "string", $ne: "" }
-  });
+  }));
 
   const groupMessage = [
     input.type === "plan_created" ? "В департаменте опубликован новый план." : "План департамента обновлен.",
@@ -1109,6 +1181,7 @@ export async function notifyDepartmentPlanChange(input: {
       groupSent += 1;
     } catch (error) {
       console.error("Telegram group plan change notification error", error);
+      if (group.chatId) await deactivateGroupAfterSendError(group.chatId, error);
     }
   }
 
@@ -1132,10 +1205,10 @@ export async function sendTelegramRecoveryBroadcast() {
   const bot = getTelegramBot();
   if (!bot) throw new Error("Telegram bot is not configured");
 
-  const groups = await TelegramGroupModel.find({
+  const groups = await TelegramGroupModel.find(activeGroupQuery({
     category: { $exists: true },
     chatId: { $type: "string", $ne: "" }
-  });
+  }));
 
   let motivationMessages = 0;
   for (const group of groups) {
@@ -1145,6 +1218,7 @@ export async function sendTelegramRecoveryBroadcast() {
       motivationMessages += 1;
     } catch (error) {
       console.error("Telegram manual motivation broadcast error", error);
+      if (group.chatId) await deactivateGroupAfterSendError(group.chatId, error);
     }
   }
 
@@ -1178,6 +1252,7 @@ export async function sendTelegramRecoveryBroadcast() {
         planAnnouncementMessages += 1;
       } catch (error) {
         console.error("Telegram manual plan announcement error", error);
+        if (group.chatId) await deactivateGroupAfterSendError(group.chatId, error);
       }
     }
 
@@ -1799,6 +1874,7 @@ bot.start(async (ctx) => {
   bot.command("day_digest", (ctx) => sendGroupDailyDigestNow(ctx));
 
   bot.on("voice", (ctx) => handleVoiceMessage(ctx));
+  bot.on("my_chat_member", (ctx) => handleBotChatMemberUpdate(ctx));
 
   bot.on("message", async (ctx, next) => {
     if (await handleDraftMessage(ctx)) return;

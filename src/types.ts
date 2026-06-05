@@ -23,10 +23,19 @@ export type User = {
   telegramDigestEnabled?: boolean;
   telegramDigestTime?: string;
   telegramDigestContent?: "productivity" | "reports" | "full";
+  telegramUserId?: string;
   telegramUsername?: string;
   telegramActivityMessages?: number;
   telegramActivityScore?: number;
   telegramActivitySummary?: string;
+  registrationSource?: "web" | "telegram_group";
+  registrationReferrer?: string;
+  registrationUtmSource?: string;
+  registrationUtmMedium?: string;
+  registrationUtmCampaign?: string;
+  registrationSocialSource?: string;
+  createdAt?: string;
+  updatedAt?: string;
   lastActiveAt: string;
 };
 

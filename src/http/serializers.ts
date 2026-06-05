@@ -27,13 +27,22 @@ export function publicUser(user: UserDocument) {
     telegramDigestEnabled: user.telegramDigestEnabled,
     telegramDigestTime: user.telegramDigestTime,
     telegramDigestContent: user.telegramDigestContent,
-    telegramUsername: user.telegramUsername,
+    telegramUserId: user.telegramUserId || undefined,
+    telegramUsername: user.telegramUsername || undefined,
     telegramActivityMessages: user.telegramActivityMessages,
     telegramActivityScore: user.telegramActivityScore,
     telegramActivitySummary: user.telegramActivitySummary,
+    registrationSource: user.registrationSource || undefined,
+    registrationReferrer: user.registrationReferrer || undefined,
+    registrationUtmSource: user.registrationUtmSource || undefined,
+    registrationUtmMedium: user.registrationUtmMedium || undefined,
+    registrationUtmCampaign: user.registrationUtmCampaign || undefined,
+    registrationSocialSource: user.registrationSocialSource || undefined,
     lastDepartmentChangedAt: user.lastDepartmentChangedAt?.toISOString(),
     lastDepartmentChangeReason: user.lastDepartmentChangeReason,
-    lastActiveAt: user.lastActiveAt.toISOString()
+    lastActiveAt: user.lastActiveAt.toISOString(),
+    createdAt: user.createdAt.toISOString(),
+    updatedAt: user.updatedAt.toISOString()
   };
 }
 

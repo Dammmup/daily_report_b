@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { Types } from "mongoose";
 import { decomposeProjectPlan } from "../../ai.js";
 import { categories, todayIso } from "../../constants.js";
 import { notifyDepartmentPlanChange, sendTelegramRecoveryBroadcast } from "../../telegram.js";
@@ -137,6 +138,24 @@ adminRouter.post("/admin/plans", auth, requireRole("admin"), async (req: AuthedR
     lead.category = category;
     lead.firstLoginCompleted = true;
     await lead.save();
+  }
+
+  const stepAssigneeIds = Array.from(new Set((body.data.steps || []).map((step) => step.assignedTo).filter(Boolean))) as string[];
+  if (stepAssigneeIds.some((id) => !Types.ObjectId.isValid(id))) {
+    res.status(400).json({ message: "Некорректный исполнитель в шагах плана" });
+    return;
+  }
+
+  if (stepAssigneeIds.length) {
+    const assignees = await UserModel.find({
+      _id: { $in: stepAssigneeIds },
+      role: { $in: ["intern", "lead"] },
+      category
+    });
+    if (assignees.length !== stepAssigneeIds.length) {
+      res.status(400).json({ message: "Исполнители шагов должны быть стажерами или тимлидами выбранного департамента" });
+      return;
+    }
   }
 
   const startDate = todayIso();

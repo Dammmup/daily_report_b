@@ -32,7 +32,15 @@ export const requestCodeSchema = z
     email: z.string().email().optional().or(z.literal("")),
     phone: z.string().min(5).optional().or(z.literal("")),
     password: z.string().min(4),
-    name: z.string().min(2)
+    name: z.string().min(2),
+    registrationMeta: z
+      .object({
+        referrer: z.string().trim().max(1000).optional().or(z.literal("")),
+        utmSource: z.string().trim().max(120).optional().or(z.literal("")),
+        utmMedium: z.string().trim().max(120).optional().or(z.literal("")),
+        utmCampaign: z.string().trim().max(200).optional().or(z.literal(""))
+      })
+      .optional()
   })
   .refine((data) => data.email || data.phone, {
     message: "Необходимо указать Email или номер телефона",
@@ -126,6 +134,10 @@ export const planStepUpdateSchema = z.object({
   deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   assignedTo: z.string().optional().nullable(),
   status: z.enum(["todo", "in_progress", "done", "canceled"]).optional()
+});
+
+export const planBulkAssignSchema = z.object({
+  assignedTo: z.string().min(1)
 });
 
 export const departmentSchema = z.object({

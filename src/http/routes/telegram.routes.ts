@@ -15,6 +15,15 @@ import { telegramDigestSchema, telegramMiniAppSessionSchema } from "../schemas.j
 import { publicUser } from "../serializers.js";
 
 export const telegramRouter = Router();
+const telegramWebhookAllowedUpdates = ["message", "callback_query", "my_chat_member"];
+
+function backendBaseUrl(req: Request) {
+  if (process.env.TELEGRAM_WEBHOOK_URL) return process.env.TELEGRAM_WEBHOOK_URL.replace(/\/api\/telegram\/webhook\/?$/, "");
+  if (process.env.BACKEND_URL) return process.env.BACKEND_URL.replace(/\/$/, "");
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL.replace(/\/$/, "")}`;
+  const proto = req.header("x-forwarded-proto") || req.protocol || "https";
+  return `${proto}://${req.get("host")}`;
+}
 
 telegramRouter.post("/telegram/mini-app-session", async (req, res) => {
   const body = telegramMiniAppSessionSchema.safeParse(req.body);
@@ -79,6 +88,32 @@ telegramRouter.post("/telegram/webhook", async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+telegramRouter.post("/telegram/webhook/setup", auth, requireRole("admin"), async (req: Request, res) => {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) {
+    res.status(400).json({ message: "TELEGRAM_BOT_TOKEN не задан" });
+    return;
+  }
+
+  const webhookUrl = process.env.TELEGRAM_WEBHOOK_URL || `${backendBaseUrl(req)}/api/telegram/webhook`;
+  const response = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      url: webhookUrl,
+      allowed_updates: telegramWebhookAllowedUpdates,
+      drop_pending_updates: false
+    })
+  });
+  const result = await response.json();
+  if (!response.ok || !result.ok) {
+    res.status(400).json({ message: "Не удалось настроить Telegram webhook", result });
+    return;
+  }
+
+  res.json({ ok: true, webhookUrl, allowedUpdates: telegramWebhookAllowedUpdates, result });
 });
 
 telegramRouter.all("/telegram/motivation-cron", async (req, res, next) => {
