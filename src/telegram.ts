@@ -203,6 +203,14 @@ function stepStatusLabel(status: string) {
   return "ожидает";
 }
 
+function formatShortDate(value: string) {
+  const [year, month, day] = value.split("-");
+  const monthLabels = ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
+  const monthIndex = Number(month) - 1;
+  if (!year || !day || monthIndex < 0 || monthIndex >= monthLabels.length) return value;
+  return `${Number(day)} ${monthLabels[monthIndex]} ${year}`;
+}
+
 function formatPlanForTelegram(plan: Awaited<ReturnType<typeof PlanModel.findOne>>, chatUserId?: string) {
   if (!plan) return "План для вашего департамента еще не создан тимлидом.";
   const steps = (plan.steps || [])
@@ -777,26 +785,23 @@ async function buildMotivationMessage(category: Category) {
     .slice(0, 6);
   const activeNames = interns.filter((user) => (user.telegramActivityMessages || 0) > 0).map((user) => user.name).slice(0, 4);
 
-  const fallback = [
-    `Доброе утро, ${categories[category]}.`,
-    plans.length
-      ? `Активных планов: ${plans.length}. Фокус: ${openSteps.map(({ plan, step }) => `${plan.title}: ${step.title}`).join("; ") || "держим текущий темп"}.`
-      : "Сегодня держим фокус на задачах департамента.",
-    activeNames.length ? `Отдельно вижу активность: ${activeNames.join(", ")}. Хороший ритм.` : "Пишите вопросы и блокеры в чат, так тимлид быстрее поможет.",
-    "Коротко зафиксируйте прогресс в дэйлике и не тяните с блокерами."
-  ].join("\n");
+  const planLines = plans.map((plan) => {
+    const steps = plan.steps || [];
+    const open = steps.filter((step) => step.status !== "done" && step.status !== "canceled").length;
+    const done = steps.filter((step) => step.status === "done").length;
+    return `- ${plan.title}: дедлайн ${formatShortDate(plan.adjustedDeadline)}, открыто ${open}/${steps.length}, готово ${done}.`;
+  });
+  const stepLines = openSteps.slice(0, 4).map(({ plan, step }) => `- ${plan.title}: ${step.title} до ${formatShortDate(step.deadline)}.`);
 
-  const ai = await askGroqAssistant(`
-Сгенерируй короткое мотивирующее сообщение в Telegram-группу стажеров.
-Тон: дружелюбно, без пафоса, 3-5 предложений.
-Департамент: ${categories[category]}
-Активные планы:
-${plans.map((plan) => `- ${plan.title}; дедлайн ${plan.adjustedDeadline}; шагов ${plan.steps.length}`).join("\n") || "план еще не создан"}
-Открытые шаги:
-${openSteps.map(({ plan, step }) => `- ${plan.title}: ${step.title} до ${step.deadline}`).join("\n") || "нет данных"}
-Активные стажеры: ${activeNames.join(", ") || "нет данных"}
-`);
-  return ai || fallback;
+  return [
+    `Доброе утро, ${categories[category]}.`,
+    plans.length ? [`Активных планов: ${plans.length}.`, ...planLines].join("\n") : "Активных планов пока нет, держим фокус на задачах департамента.",
+    stepLines.length ? ["Ближайший фокус по шагам:", ...stepLines].join("\n") : "",
+    activeNames.length ? `Вижу активность: ${activeNames.join(", ")}.` : "Пишите вопросы и блокеры в чат, так тимлид быстрее поможет.",
+    "Зафиксируйте прогресс в дэйлике и сразу подсвечивайте блокеры."
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 export async function sendWeekdayGroupMotivation() {

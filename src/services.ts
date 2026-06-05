@@ -1,7 +1,7 @@
 import type { Types } from "mongoose";
 import { askGroqAssistant, reviewReport } from "./ai.js";
 import { addDays, categories, todayIso } from "./constants.js";
-import { AttendanceModel, PlanModel, ReportModel, SurveyModel, UserModel, type UserDocument } from "./models.js";
+import { AttendanceModel, PlanModel, ReportModel, StepArtifactModel, SurveyModel, UserModel, type UserDocument } from "./models.js";
 import type { AssignmentDraft, Category, DecisionCenter, PlanFitCandidate } from "./types.js";
 
 const activePlanFilter = { status: { $in: ["draft", "approved"] as const } } as any;
@@ -91,11 +91,11 @@ export async function createDailyReport(input: {
     aiReview
   });
 
-  if (user.role === "intern" && plans.length && aiReview.deadlineImpactDays > 0) {
+  if (user.role === "intern" && plans.length && linkedStepIds.length && aiReview.deadlineImpactDays > 0) {
     const affectedPlanIds = new Set(
       linkedStepIds.flatMap((stepId) => plans.filter((plan) => plan.steps.id(stepId)).map((plan) => plan.id))
     );
-    const plansToExtend = affectedPlanIds.size ? plans.filter((plan) => affectedPlanIds.has(plan.id)) : plans.slice(0, 1);
+    const plansToExtend = plans.filter((plan) => affectedPlanIds.has(plan.id));
     await Promise.all(
       plansToExtend.map(async (plan) => {
         plan.adjustedDeadline = addDays(plan.adjustedDeadline, aiReview.deadlineImpactDays);
@@ -643,10 +643,29 @@ export async function buildPlanFitAssistant(input: {
     SurveyModel.find().lean()
   ]);
   const reports = interns.length ? await ReportModel.find({ userId: { $in: interns.map((user) => user._id) } }).sort({ createdAt: -1 }) : [];
+  const stepArtifacts = await StepArtifactModel.find({
+    planId: plan._id,
+    ...(selectedStep ? { stepId: selectedStep._id } : {})
+  }).sort({ createdAt: -1 });
+  const artifactUsers = stepArtifacts.length ? await UserModel.find({ _id: { $in: stepArtifacts.map((artifact) => artifact.userId) } }) : [];
+  const artifactContext = stepArtifacts
+    .slice(0, 20)
+    .map((artifact) => {
+      const step = plan.steps.id(artifact.stepId.toString());
+      const author = artifactUsers.find((user) => user.id === artifact.userId.toString());
+      return [
+        `Шаг: ${step?.title || artifact.stepId.toString()}`,
+        `Материал: ${artifact.title}`,
+        `Ссылка: ${artifact.url}`,
+        `Автор: ${author?.name || artifact.userId.toString()}`,
+        `Добавлено: ${artifact.createdAt.toISOString()}`
+      ].join(" | ");
+    })
+    .join("\n");
 
   const planText = selectedStep
-    ? `${selectedStep.title} ${selectedStep.description || ""} ${selectedStep.technicalSpec || ""} ${selectedStep.technicalInstruction || ""} ${selectedStep.deadline || ""}`
-    : `${plan.title} ${plan.milestones.join(" ")} ${plan.aiRationale}`;
+    ? `${selectedStep.title} ${selectedStep.description || ""} ${selectedStep.technicalSpec || ""} ${selectedStep.technicalInstruction || ""} ${selectedStep.deadline || ""} ${artifactContext}`
+    : `${plan.title} ${plan.milestones.join(" ")} ${plan.aiRationale} ${artifactContext}`;
   const rows = interns.map((user) => {
     const survey = surveys.find((item) => item.userId.toString() === user.id);
     const userReports = reports.filter((report) => report.userId.toString() === user.id);
@@ -718,6 +737,9 @@ export async function buildPlanFitAssistant(input: {
 Дедлайн: ${plan.adjustedDeadline}
 Этапы: ${plan.milestones.join("; ")}
 ${selectedStep ? `\nВыбранная задача:\n${selectedStep.title}\n${selectedStep.description || ""}\nТЗ: ${selectedStep.technicalSpec || "не указано"}\nИнструкция: ${selectedStep.technicalInstruction || "не указано"}\nДедлайн: ${selectedStep.deadline}` : ""}
+
+Материалы и ссылки, прикрепленные к выполнению шагов:
+${artifactContext || "Пока не прикреплены"}
 
 Кандидаты, выбранные системой по AI-профилям миниопроса:
 ${context || "Кандидатов нет"}

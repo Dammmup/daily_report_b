@@ -258,14 +258,20 @@ planRouter.post("/department-plan/:planId/assignments/apply", auth, requireRole(
   });
 });
 
-planRouter.post("/department-plan/steps", auth, requireRole("lead"), async (req: AuthedRequest, res) => {
+planRouter.post(["/department-plan/steps", "/department-plan/:planId/steps"], auth, requireRole("lead"), async (req: AuthedRequest, res) => {
   const body = planStepCreateSchema.safeParse(req.body);
   if (!body.success) {
     res.status(400).json({ message: "Некорректный шаг плана" });
     return;
   }
 
-  const plan = req.user!.category ? await PlanModel.findOne(activePlanQuery(req.user!.category)).sort({ createdAt: -1 }) : null;
+  const plan = req.params.planId
+    ? req.user!.category
+      ? await PlanModel.findOne({ _id: req.params.planId, ...activePlanQuery(req.user!.category) } as any)
+      : null
+    : req.user!.category
+      ? await PlanModel.findOne(activePlanQuery(req.user!.category)).sort({ createdAt: -1 })
+      : null;
   if (!plan) {
     res.status(404).json({ message: "Сначала создайте план департамента" });
     return;
@@ -323,7 +329,7 @@ planRouter.patch("/department-plan/steps/:stepId", auth, requireRole("lead", "ad
     req.user!.role === "admin"
       ? await PlanModel.findOne({ "steps._id": req.params.stepId } as any).sort({ createdAt: -1 })
       : req.user!.category
-        ? await PlanModel.findOne(activePlanQuery(req.user!.category)).sort({ createdAt: -1 })
+        ? await PlanModel.findOne({ ...activePlanQuery(req.user!.category), "steps._id": req.params.stepId } as any).sort({ createdAt: -1 })
         : null;
   const step = plan?.steps.id(String(req.params.stepId));
   if (!plan || !step) {

@@ -37,11 +37,13 @@ reportRouter.patch("/reports/:id", auth, async (req: AuthedRequest, res) => {
     return;
   }
 
-  const plan = req.user!.category ? await PlanModel.findOne({ category: req.user!.category, status: { $in: ["draft", "approved"] } } as any).sort({ createdAt: -1 }) : null;
-  const linkedStepIds = plan
+  const plans = req.user!.category ? await PlanModel.find({ category: req.user!.category, status: { $in: ["draft", "approved"] } } as any).sort({ createdAt: -1 }) : [];
+  const linkedStepIds = plans.length
     ? body.data.linkedStepIds.filter((stepId) => {
-        const step = plan.steps.id(stepId);
-        return Boolean(step && step.assignedTo?.toString() === req.user!.id);
+        return plans.some((plan) => {
+          const step = plan.steps.id(stepId);
+          return Boolean(step && step.assignedTo?.toString() === req.user!.id);
+        });
       })
     : [];
 
