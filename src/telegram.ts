@@ -1,18 +1,28 @@
 import { Markup, Telegraf, type Context } from "telegraf";
 import { hashPassword } from "./auth.js";
-import { askGroqAssistant, transcribeAudio } from "./ai.js";
+import { askGroqAssistant, askGroqTelegramAssistant, transcribeAudio } from "./ai.js";
 import { categories, randomAvatarColor } from "./constants.js";
 import { PlanChangeModel, PlanModel, ReportModel, TelegramActivityModel, TelegramDraftModel, TelegramGroupModel, UserModel } from "./models.js";
 import { createDailyReport, formatLeadSummary } from "./services.js";
 import type { Category } from "./types.js";
 
 type DigestContent = "productivity" | "reports" | "full";
+type TelegramFunMedia = {
+  type: "animation" | "sticker";
+  fileId: string;
+  fileUniqueId?: string;
+};
 
 let botInstance: Telegraf | undefined;
 let pollingStarted = false;
 let digestTimer: NodeJS.Timeout | undefined;
+let funTimer: NodeJS.Timeout | undefined;
 const temporaryGroupMessageTtlMs = Number(process.env.TELEGRAM_TEMP_MESSAGE_TTL_MS || 5000);
 const activePlanFilter = { status: { $in: ["draft", "approved"] as const } } as any;
+const almatyUtcOffsetMs = 5 * 60 * 60 * 1000;
+const funReplyLookbackMs = 72 * 60 * 60 * 1000;
+const telegramAiWindowMs = 10 * 60 * 1000;
+const telegramAiCooldownMs = 20 * 60 * 1000;
 
 const tileKeyboard = Markup.keyboard([
   ["План", "Дэйлик"],
@@ -39,6 +49,28 @@ function isSameIsoDay(date?: Date | null) {
 function isWeekdayUtc() {
   const weekday = new Date().getUTCDay();
   return weekday !== 0 && weekday !== 6;
+}
+
+function randomItem<T>(items: readonly T[]): T | undefined {
+  return items[Math.floor(Math.random() * items.length)];
+}
+
+function nextRandomFunReplyAt(now = new Date()) {
+  const localNow = new Date(now.getTime() + almatyUtcOffsetMs);
+  const localMidnightMs = Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate());
+  const minimumLeadMs = 30 * 60 * 1000;
+
+  for (let dayOffset = 0; dayOffset < 8; dayOffset += 1) {
+    const localDayMs = localMidnightMs + dayOffset * 24 * 60 * 60 * 1000;
+    const weekday = new Date(localDayMs).getUTCDay();
+    if (weekday === 0 || weekday === 6) continue;
+
+    const randomMinute = 10 * 60 + Math.floor(Math.random() * 8 * 60);
+    const candidate = new Date(localDayMs + randomMinute * 60 * 1000 - almatyUtcOffsetMs);
+    if (candidate.getTime() > now.getTime() + minimumLeadMs) return candidate;
+  }
+
+  return new Date(now.getTime() + 24 * 60 * 60 * 1000);
 }
 
 const departmentKeywords: Record<Category, string[]> = {
@@ -366,7 +398,7 @@ function groupDepartmentKeyboard() {
   ]);
 }
 
-function groupActionsKeyboard(enabled?: boolean) {
+function groupActionsKeyboard(enabled?: boolean, funEnabled?: boolean) {
   return Markup.inlineKeyboard([
     [Markup.button.callback("Статус группы", "group:status"), Markup.button.callback("Сменить департамент", "group:department:choose")],
     [Markup.button.callback("План группы", "plan:view"), Markup.button.callback("Дайджест дня", "group:digest:now")],
@@ -375,11 +407,16 @@ function groupActionsKeyboard(enabled?: boolean) {
       enabled
         ? Markup.button.callback("Отключить мотивацию", "group:motivation:off")
         : Markup.button.callback("Включить мотивацию", "group:motivation:on")
+    ],
+    [
+      funEnabled
+        ? Markup.button.callback("Отключить GIF/стикеры", "group:fun:off")
+        : Markup.button.callback("Включить GIF/стикеры", "group:fun:on")
     ]
   ]);
 }
 
-function groupMenuKeyboard(enabled?: boolean) {
+function groupMenuKeyboard(enabled?: boolean, funEnabled?: boolean) {
   return Markup.inlineKeyboard([
     [Markup.button.callback("План группы", "plan:view"), Markup.button.callback("Сводка группы", "summary:view")],
     [Markup.button.callback("Статус группы", "group:status"), Markup.button.callback("Сменить департамент", "group:department:choose")],
@@ -388,6 +425,11 @@ function groupMenuKeyboard(enabled?: boolean) {
       enabled
         ? Markup.button.callback("Отключить мотивацию", "group:motivation:off")
         : Markup.button.callback("Включить мотивацию", "group:motivation:on")
+    ],
+    [
+      funEnabled
+        ? Markup.button.callback("Отключить GIF/стикеры", "group:fun:off")
+        : Markup.button.callback("Включить GIF/стикеры", "group:fun:on")
     ]
   ]);
 }
@@ -543,6 +585,7 @@ async function trackGroupText(ctx: Context, text: string) {
   await TelegramActivityModel.create({
     userId: user._id,
     chatId,
+    messageId: ctx.message?.message_id,
     text: text.slice(0, 1000),
     messageAt: now
   });
@@ -581,8 +624,49 @@ function shouldAnswerGroupQuestion(ctx: Context, text: string) {
     ctx.message &&
     "reply_to_message" in ctx.message &&
     ctx.message.reply_to_message?.from?.id === ctx.botInfo?.id;
-  const asksPlan = /(план|шаг|задач|дедлайн|кто может|кому взять|что делать|архитектур|логик|блокер|прогресс)/i.test(text);
-  return Boolean((mentionsBot || repliesToBot) && asksPlan);
+  return Boolean(mentionsBot || repliesToBot);
+}
+
+function questionWithoutBotMention(ctx: Context, text: string) {
+  const username = ctx.botInfo?.username;
+  if (!username) return text.trim();
+  return text.replace(new RegExp(`@${username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "gi"), "").trim();
+}
+
+async function consumeGroupAiAllowance(ctx: Context) {
+  if (!ctx.from) return { allowed: false, notify: false, name: "Коллега" };
+
+  const telegramUserId = String(ctx.from.id);
+  const username = ctx.from.username?.toLowerCase();
+  let user = await UserModel.findOne({ telegramUserId });
+  if (!user && username) user = await UserModel.findOne({ telegramUsername: username });
+  if (!user) return { allowed: true, notify: false, name: buildTelegramName(ctx.from) };
+
+  const now = new Date();
+  const name = user.name || buildTelegramName(ctx.from);
+  if (user.telegramAiCooldownUntil && user.telegramAiCooldownUntil.getTime() > now.getTime()) {
+    return { allowed: false, notify: false, name };
+  }
+
+  const windowExpired =
+    !user.telegramAiWindowStartedAt ||
+    now.getTime() - user.telegramAiWindowStartedAt.getTime() >= telegramAiWindowMs;
+  if (windowExpired) {
+    user.telegramAiWindowStartedAt = now;
+    user.telegramAiRepliesInWindow = 0;
+    user.telegramAiCooldownUntil = undefined as any;
+  }
+
+  const limit = user.role === "intern" ? 6 : 12;
+  if ((user.telegramAiRepliesInWindow || 0) >= limit) {
+    user.telegramAiCooldownUntil = new Date(now.getTime() + telegramAiCooldownMs);
+    await user.save();
+    return { allowed: false, notify: true, name };
+  }
+
+  user.telegramAiRepliesInWindow = (user.telegramAiRepliesInWindow || 0) + 1;
+  await user.save();
+  return { allowed: true, notify: false, name };
 }
 
 async function answerGroupQuestion(ctx: Context, text: string) {
@@ -591,7 +675,7 @@ async function answerGroupQuestion(ctx: Context, text: string) {
   const group = await TelegramGroupModel.findOne({ chatId: String(ctx.chat!.id) });
   const category = group?.category as Category | undefined;
   if (!category) {
-    await ctx.reply("Я могу помочь по плану, но группа еще не привязана к департаменту.", {
+    await ctx.reply("Сначала привяжите группу к департаменту. Тогда я получу рабочий контекст и смогу нормально отвечать, а не гадать по воздуху.", {
       reply_to_message_id: ctx.message?.message_id
     } as Parameters<Context["reply"]>[1]);
     return true;
@@ -601,22 +685,56 @@ async function answerGroupQuestion(ctx: Context, text: string) {
     return true;
   }
 
-  const [plans, interns, reports] = await Promise.all([
+  const question = questionWithoutBotMention(ctx, text);
+  if (!question) {
+    await ctx.reply("Я здесь. Сформулируй вопрос целиком, и разберёмся.", {
+      reply_to_message_id: ctx.message?.message_id
+    } as Parameters<Context["reply"]>[1]);
+    return true;
+  }
+
+  const allowance = await consumeGroupAiAllowance(ctx);
+  if (!allowance.allowed) {
+    if (allowance.notify) {
+      await ctx.reply(
+        `${allowance.name}, давай немного выдохнем. За последние 10 минут вопросов уже много. Я возьму паузу на 20 минут, а ты пока собери их в один список — так будет полезнее и спокойнее для рабочего чата.`,
+        {
+          reply_to_message_id: ctx.message?.message_id
+        } as Parameters<Context["reply"]>[1]
+      );
+    }
+    return true;
+  }
+
+  await ctx.telegram.sendChatAction(ctx.chat!.id, "typing").catch(() => undefined);
+
+  const [plans, interns, reports, recentActivities] = await Promise.all([
     findActivePlans(category, 5),
     UserModel.find({ role: "intern", category }).sort({ telegramActivityScore: -1 }).limit(8),
-    ReportModel.find({ date: todayIso() }).sort({ createdAt: -1 }).limit(20)
+    ReportModel.find({ date: todayIso() }).sort({ createdAt: -1 }).limit(20),
+    TelegramActivityModel.find({ chatId: String(ctx.chat!.id) }).sort({ messageAt: -1 }).limit(12)
   ]);
   const internIds = new Set(interns.map((user) => user.id));
   const departmentReports = reports.filter((report) => internIds.has(report.userId.toString()));
+  const recentUserIds = [...new Set(recentActivities.map((activity) => activity.userId.toString()))];
+  const recentUsers = recentUserIds.length ? await UserModel.find({ _id: { $in: recentUserIds } }) : [];
+  const recentUserById = new Map(recentUsers.map((user) => [user.id, user.name]));
+  const recentConversation = recentActivities
+    .reverse()
+    .map((activity) => `- ${recentUserById.get(activity.userId.toString()) || "Участник"}: ${activity.text.slice(0, 500)}`)
+    .join("\n");
 
-  const answer = await askGroqAssistant(`
-Ты Telegram-помощник mini ERP в группе департамента.
-Отвечай коротко, практично, по-русски. Не выдумывай данные, которых нет в контексте.
-Если вопрос про выбор исполнителя, предложи 1-3 стажеров и объясни почему на основе активности/AI-сводки/дэйликов.
+  const answer = await askGroqTelegramAssistant(`
+Ответь участнику рабочей Telegram-группы.
+Если вопрос относится к компании, проектам, людям или срокам, используй только рабочий контекст ниже.
+Если это общий вопрос, отвечай на основе общих знаний.
+Если вопрос неоднозначный, задай один короткий уточняющий вопрос.
+Если выбираешь исполнителя, предложи не больше трёх подходящих стажёров и объясни выбор, не раскрывая внутренние AI-оценки.
 
 Вопрос:
-${text}
+${question}
 
+Рабочий контекст:
 Департамент: ${categories[category]}
 Активные планы:
 ${plans.map((plan) => `- ${plan.title}, дедлайн ${plan.adjustedDeadline}, версия #${plan.version || 1}`).join("\n") || "нет активных планов"}
@@ -624,13 +742,16 @@ ${plans.map((plan) => `- ${plan.title}, дедлайн ${plan.adjustedDeadline},
 ${plans.flatMap((plan) => (plan.steps || []).map((step) => `- ${plan.title}: ${step.title}; статус ${stepStatusLabel(step.status)}; дедлайн ${step.deadline}; ${step.assignedTo ? "назначен" : "свободен"}`)).slice(0, 15).join("\n") || "нет шагов"}
 
 Стажеры:
-${interns.map((user) => `- ${user.name}; активность ${user.telegramActivityScore || 0}; ${user.telegramActivitySummary || "сводки нет"}`).join("\n") || "нет стажеров"}
+${interns.map((user) => `- ${user.name}; сообщений в группе ${user.telegramActivityMessages || 0}; ${user.telegramActivitySummary || "сводки нет"}`).join("\n") || "нет стажеров"}
 
 Сегодняшние дэйлики:
-${departmentReports.map((report) => `- ${report.yesterday}; план ${report.todayPlan}; блокеры ${report.blockers || "нет"}; score ${report.aiReview?.productivityScore || 0}`).join("\n") || "нет дэйликов"}
+${departmentReports.map((report) => `- ${report.yesterday}; план ${report.todayPlan}; блокеры ${report.blockers || "нет"}`).join("\n") || "нет дэйликов"}
+
+Последние сообщения группы:
+${recentConversation || "контекст переписки пока пуст"}
 `);
 
-  await ctx.reply(answer || "По текущим данным вижу план и активность, но не хватает фактов для уверенной рекомендации.", {
+  await ctx.reply(answer || "Сейчас AI-модель не ответила. Попробуй ещё раз чуть позже или сформулируй вопрос короче.", {
     reply_to_message_id: ctx.message?.message_id
   } as Parameters<Context["reply"]>[1]);
   return true;
@@ -754,7 +875,11 @@ async function applyGroupDepartment(ctx: Context, category: Category) {
     { upsert: true, returnDocument: "after" }
   );
 
-  await replyTemporary(ctx, `Группа привязана к департаменту: ${categories[category]}. Участников вижу: ${group.membersSeen}.`, groupActionsKeyboard(group.motivationEnabled));
+  await replyTemporary(
+    ctx,
+    `Группа привязана к департаменту: ${categories[category]}. Участников вижу: ${group.membersSeen}.`,
+    groupActionsKeyboard(group.motivationEnabled, group.funEnabled)
+  );
 }
 
 async function setGroupDepartment(ctx: Context) {
@@ -811,6 +936,7 @@ async function sendGroupStatus(ctx: Context) {
       `Департамент: ${categories[group.category as Category]}`,
       `Стажеров найдено по чату: ${members}`,
       `Мотивация: ${group.motivationEnabled ? "включена" : "выключена"}`,
+      `GIF/стикеры: ${group.funEnabled ? `включены, сохранено ${group.funMedia.length}` : `выключены, сохранено ${group.funMedia.length}`}`,
       plans.length ? `Активных планов: ${plans.length}. Последний: ${plans[0].title}, дедлайн ${plans[0].adjustedDeadline}` : "План департамента еще не создан"
     ].join("\n"),
     undefined,
@@ -843,6 +969,148 @@ async function setGroupMotivation(ctx: Context, enabled: boolean) {
   );
 
   await replyTemporary(ctx, `Будничная мотивация ${group.motivationEnabled ? "включена" : "выключена"}.`);
+}
+
+function funMediaFromReply(ctx: Context): TelegramFunMedia | undefined {
+  const message = ctx.message;
+  if (!message || !("reply_to_message" in message) || !message.reply_to_message) return undefined;
+
+  const replied = message.reply_to_message;
+  if ("animation" in replied && replied.animation) {
+    return {
+      type: "animation",
+      fileId: replied.animation.file_id,
+      fileUniqueId: replied.animation.file_unique_id
+    };
+  }
+  if ("sticker" in replied && replied.sticker) {
+    return {
+      type: "sticker",
+      fileId: replied.sticker.file_id,
+      fileUniqueId: replied.sticker.file_unique_id
+    };
+  }
+  return undefined;
+}
+
+async function sendTelegramFunMedia(bot: Telegraf, chatId: string, media: TelegramFunMedia, replyToMessageId?: number) {
+  const options = replyToMessageId ? ({ reply_to_message_id: replyToMessageId } as any) : undefined;
+  if (media.type === "animation") {
+    await bot.telegram.sendAnimation(chatId, media.fileId, options);
+    return;
+  }
+  await bot.telegram.sendSticker(chatId, media.fileId, options);
+}
+
+async function addGroupFunMedia(ctx: Context) {
+  if (!(await requireGroupAdmin(ctx))) return;
+  deleteIncomingMessageLater(ctx);
+
+  const media = funMediaFromReply(ctx);
+  if (!media) {
+    await replyTemporary(ctx, "Ответьте командой /fun_add на GIF или стикер, который бот сможет использовать.", undefined, 15000);
+    return;
+  }
+
+  const title = ctx.chat && "title" in ctx.chat ? ctx.chat.title : "Telegram group";
+  const group = await TelegramGroupModel.findOneAndUpdate(
+    { chatId: String(ctx.chat!.id) },
+    {
+      $set: {
+        chatId: String(ctx.chat!.id),
+        title,
+        active: true,
+        funEnabled: true,
+        lastActivityAt: new Date()
+      }
+    },
+    { upsert: true, returnDocument: "after" }
+  );
+
+  const mediaItems = group.funMedia as unknown as TelegramFunMedia[];
+  const duplicate = mediaItems.some(
+    (item) => (media.fileUniqueId && item.fileUniqueId === media.fileUniqueId) || item.fileId === media.fileId
+  );
+  if (!duplicate) {
+    group.funMedia.push({
+      ...media,
+      addedByTelegramUserId: ctx.from ? String(ctx.from.id) : undefined,
+      addedAt: new Date()
+    });
+    if (group.funMedia.length > 30) group.funMedia.splice(0, group.funMedia.length - 30);
+  }
+  if (!group.funNextReplyAt) group.funNextReplyAt = nextRandomFunReplyAt();
+  await group.save();
+
+  await replyTemporary(
+    ctx,
+    duplicate
+      ? `Этот файл уже сохранен. В медиатеке: ${group.funMedia.length}.`
+      : `Сохранено. В медиатеке: ${group.funMedia.length}. GIF/стикеры включены.`,
+    undefined,
+    12000
+  );
+}
+
+async function setGroupFun(ctx: Context, enabled: boolean) {
+  if (!(await requireGroupAdmin(ctx))) return;
+  deleteIncomingMessageLater(ctx);
+  deleteCallbackSourceLater(ctx);
+
+  const group = await TelegramGroupModel.findOne({ chatId: String(ctx.chat!.id) });
+  if (!group) {
+    await replyTemporary(ctx, "Сначала привяжите группу к департаменту.");
+    return;
+  }
+  if (enabled && !group.funMedia.length) {
+    await replyTemporary(ctx, "Сначала ответьте командой /fun_add на GIF или стикер.", undefined, 15000);
+    return;
+  }
+
+  group.funEnabled = enabled;
+  group.funNextReplyAt = enabled ? nextRandomFunReplyAt() : (undefined as any);
+  await group.save();
+  await replyTemporary(ctx, `GIF и стикеры ${enabled ? "включены" : "выключены"}.`);
+}
+
+async function sendGroupFunStatus(ctx: Context) {
+  if (!(await requireGroupAdmin(ctx))) return;
+  deleteIncomingMessageLater(ctx);
+
+  const group = await TelegramGroupModel.findOne({ chatId: String(ctx.chat!.id) });
+  if (!group) {
+    await replyTemporary(ctx, "Сначала привяжите группу к департаменту.");
+    return;
+  }
+
+  await replyTemporary(
+    ctx,
+    [
+      `GIF/стикеры: ${group.funEnabled ? "включены" : "выключены"}`,
+      `Сохранено файлов: ${group.funMedia.length}`,
+      group.funNextReplyAt
+        ? `Следующий случайный ответ: примерно ${group.funNextReplyAt.toLocaleString("ru-RU", { timeZone: "Asia/Almaty" })}`
+        : "",
+      "Чтобы добавить файл, ответьте на GIF или стикер командой /fun_add."
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    undefined,
+    20000
+  );
+}
+
+async function clearGroupFunMedia(ctx: Context) {
+  if (!(await requireGroupAdmin(ctx))) return;
+  deleteIncomingMessageLater(ctx);
+
+  const group = await TelegramGroupModel.findOne({ chatId: String(ctx.chat!.id) });
+  if (!group) return;
+  group.funMedia.splice(0, group.funMedia.length);
+  group.funEnabled = false;
+  group.funNextReplyAt = undefined as any;
+  await group.save();
+  await replyTemporary(ctx, "Медиатека GIF и стикеров очищена.");
 }
 
 async function handleGroupDepartmentCommand(ctx: Context) {
@@ -878,9 +1146,10 @@ async function sendGroupStatusWithButtons(ctx: Context) {
       `Департамент: ${categories[group.category as Category]}`,
       `Стажеров найдено по чату: ${members}`,
       `Мотивация: ${group.motivationEnabled ? "включена" : "выключена"}`,
+      `GIF/стикеры: ${group.funEnabled ? `включены, сохранено ${group.funMedia.length}` : `выключены, сохранено ${group.funMedia.length}`}`,
       plans.length ? `Активных планов: ${plans.length}. Последний: ${plans[0].title}, дедлайн ${plans[0].adjustedDeadline}` : "План департамента еще не создан"
     ].join("\n"),
-    groupActionsKeyboard(group.motivationEnabled),
+    groupActionsKeyboard(group.motivationEnabled, group.funEnabled),
     15000
   );
 }
@@ -943,6 +1212,14 @@ export async function sendWeekdayGroupMotivation() {
 
       const message = await buildMotivationMessage(group.category as Category);
       await bot.telegram.sendMessage(group.chatId, message);
+      const media = randomItem(group.funMedia as unknown as TelegramFunMedia[]);
+      if (group.funEnabled && media) {
+        try {
+          await sendTelegramFunMedia(bot, group.chatId, media);
+        } catch (error) {
+          console.error("Telegram motivation fun media error", error);
+        }
+      }
       group.motivationLastSentAt = now;
       await group.save();
       sent += 1;
@@ -972,6 +1249,90 @@ async function sendGroupMotivationNow(ctx: Context) {
 
   const message = await buildMotivationMessage(group.category as Category);
   await ctx.reply(message);
+  const media = randomItem(group.funMedia as unknown as TelegramFunMedia[]);
+  const bot = getTelegramBot();
+  if (bot && group.funEnabled && media) {
+    try {
+      await sendTelegramFunMedia(bot, group.chatId, media);
+    } catch (error) {
+      console.error("Telegram manual motivation fun media error", error);
+    }
+  }
+}
+
+export async function sendRandomTelegramFunReply() {
+  const bot = getTelegramBot();
+  if (!bot) throw new Error("Telegram bot is not configured");
+
+  const now = new Date();
+  const groups = (await findAllDepartmentTelegramGroups()).filter(
+    (group) => group.funEnabled && group.funMedia.length > 0
+  );
+  let scheduled = 0;
+  let sent = 0;
+  let withoutRecentMessages = 0;
+
+  for (const group of groups) {
+    if (!group.funNextReplyAt) {
+      group.funNextReplyAt = nextRandomFunReplyAt(now);
+      await group.save();
+      scheduled += 1;
+      continue;
+    }
+    if (group.funNextReplyAt.getTime() > now.getTime()) continue;
+
+    const nextReplyAt = nextRandomFunReplyAt(new Date(now.getTime() + 12 * 60 * 60 * 1000));
+    const claimed = await TelegramGroupModel.findOneAndUpdate(
+      {
+        _id: group._id,
+        active: { $ne: false },
+        funEnabled: true,
+        funNextReplyAt: { $lte: now }
+      },
+      {
+        $set: {
+          funNextReplyAt: nextReplyAt
+        }
+      },
+      { returnDocument: "after" }
+    );
+    if (!claimed) continue;
+
+    const recentActivities = await TelegramActivityModel.find({
+      chatId: claimed.chatId,
+      messageId: { $gte: 1 },
+      funRepliedAt: { $exists: false },
+      messageAt: { $gte: new Date(now.getTime() - funReplyLookbackMs) }
+    })
+      .sort({ messageAt: -1 })
+      .limit(200);
+
+    const activitiesByUser = new Map<string, typeof recentActivities>();
+    for (const activity of recentActivities) {
+      const userId = activity.userId.toString();
+      activitiesByUser.set(userId, [...(activitiesByUser.get(userId) || []), activity]);
+    }
+    const selectedUserActivities = randomItem(Array.from(activitiesByUser.values()));
+    const activity = selectedUserActivities ? randomItem(selectedUserActivities) : undefined;
+    const media = randomItem(claimed.funMedia as unknown as TelegramFunMedia[]);
+    if (!activity?.messageId || !media) {
+      withoutRecentMessages += 1;
+      continue;
+    }
+
+    try {
+      await sendTelegramFunMedia(bot, claimed.chatId, media, activity.messageId);
+      await TelegramActivityModel.updateOne({ _id: activity._id }, { $set: { funRepliedAt: now } });
+      claimed.funLastReplyAt = now;
+      await claimed.save();
+      sent += 1;
+    } catch (error) {
+      console.error("Telegram random fun reply error", error);
+      await deactivateGroupAfterSendError(claimed.chatId, error);
+    }
+  }
+
+  return { groups: groups.length, scheduled, sent, withoutRecentMessages };
 }
 
 async function buildGroupDailyDigest(category: Category) {
@@ -1245,6 +1606,8 @@ export async function sendTelegramRecoveryBroadcast() {
     try {
       if (!group.chatId?.trim() || !group.category) continue;
       await bot.telegram.sendMessage(group.chatId, await buildMotivationMessage(group.category as Category));
+      const media = randomItem(group.funMedia as unknown as TelegramFunMedia[]);
+      if (group.funEnabled && media) await sendTelegramFunMedia(bot, group.chatId, media);
       motivationMessages += 1;
     } catch (error) {
       console.error("Telegram manual motivation broadcast error", error);
@@ -1652,7 +2015,7 @@ async function sendMainMenu(ctx: Context) {
       group?.category
         ? `Меню группы департамента: ${categories[group.category as Category]}`
         : "Меню группы. Сначала выберите департамент.",
-      group?.category ? groupMenuKeyboard(group.motivationEnabled) : groupDepartmentKeyboard(),
+      group?.category ? groupMenuKeyboard(group.motivationEnabled, group.funEnabled) : groupDepartmentKeyboard(),
       15000
     );
     return;
@@ -1839,6 +2202,15 @@ function startDigestScheduler(bot: Telegraf) {
   }, 60_000);
 }
 
+function startFunScheduler() {
+  if (funTimer || isServerlessRuntime()) return;
+
+  void sendRandomTelegramFunReply().catch((error) => console.error("Telegram initial fun scheduler error", error));
+  funTimer = setInterval(() => {
+    void sendRandomTelegramFunReply().catch((error) => console.error("Telegram fun scheduler error", error));
+  }, 15 * 60_000);
+}
+
 export function getTelegramBot() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) return undefined;
@@ -1902,6 +2274,11 @@ bot.start(async (ctx) => {
   bot.command("motivation_off", (ctx) => setGroupMotivation(ctx, false));
   bot.command("motivation", (ctx) => sendGroupMotivationNow(ctx));
   bot.command("day_digest", (ctx) => sendGroupDailyDigestNow(ctx));
+  bot.command("fun_add", (ctx) => addGroupFunMedia(ctx));
+  bot.command("fun_on", (ctx) => setGroupFun(ctx, true));
+  bot.command("fun_off", (ctx) => setGroupFun(ctx, false));
+  bot.command("fun_status", (ctx) => sendGroupFunStatus(ctx));
+  bot.command("fun_clear", (ctx) => clearGroupFunMedia(ctx));
 
   bot.on("voice", (ctx) => handleVoiceMessage(ctx));
   bot.on("my_chat_member", (ctx) => handleBotChatMemberUpdate(ctx));
@@ -1974,6 +2351,18 @@ bot.start(async (ctx) => {
     if (!(await requireGroupAdmin(ctx))) return;
     await ctx.answerCbQuery("Мотивация отключается");
     await setGroupMotivation(ctx, false);
+    await sendGroupStatusWithButtons(ctx);
+  });
+  bot.action("group:fun:on", async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    await ctx.answerCbQuery("GIF и стикеры включаются");
+    await setGroupFun(ctx, true);
+    await sendGroupStatusWithButtons(ctx);
+  });
+  bot.action("group:fun:off", async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    await ctx.answerCbQuery("GIF и стикеры отключаются");
+    await setGroupFun(ctx, false);
     await sendGroupStatusWithButtons(ctx);
   });
   bot.action("group:motivation:now", async (ctx) => {
@@ -2178,6 +2567,8 @@ bot.start(async (ctx) => {
     { command: "summary", description: "Сводка для тимлида" },
     { command: "day_digest", description: "Дайджест группы" },
     { command: "motivation", description: "Мотивация группы" },
+    { command: "fun_add", description: "Сохранить GIF или стикер" },
+    { command: "fun_status", description: "Настройки GIF и стикеров" },
     { command: "digest", description: "Автосводка для тимлида" },
     { command: "link", description: "Привязать Telegram к аккаунту" }
   ]);
@@ -2194,6 +2585,7 @@ bot.start(async (ctx) => {
 
   botInstance = bot;
   startDigestScheduler(bot);
+  startFunScheduler();
   return bot;
 }
 

@@ -5,6 +5,7 @@ import { categories } from "../../constants.js";
 import { TelegramGroupModel, UserModel } from "../../models.js";
 import {
   handleTelegramWebhook,
+  sendRandomTelegramFunReply,
   sendTelegramProductivityAutomation,
   sendWeekdayGroupDailyDigests,
   sendWeekdayGroupMotivation,
@@ -39,6 +40,10 @@ function serializeTelegramGroup(group: Awaited<ReturnType<typeof TelegramGroupMo
     isPrimary: Boolean(group.isPrimary),
     membersSeen: group.membersSeen || 0,
     motivationEnabled: Boolean(group.motivationEnabled),
+    funEnabled: Boolean(group.funEnabled),
+    funMediaCount: group.funMedia.length,
+    funLastReplyAt: group.funLastReplyAt?.toISOString(),
+    funNextReplyAt: group.funNextReplyAt?.toISOString(),
     lastActivityAt: group.lastActivityAt?.toISOString(),
     createdAt: group.createdAt.toISOString(),
     updatedAt: group.updatedAt.toISOString()
@@ -231,6 +236,15 @@ telegramRouter.all("/telegram/group-digest-cron", async (req, res, next) => {
   try {
     if (!authorizeCron(req, res)) return;
     res.json({ ok: true, ...(await sendWeekdayGroupDailyDigests()) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+telegramRouter.all("/telegram/fun-cron", async (req, res, next) => {
+  try {
+    if (!authorizeCron(req, res)) return;
+    res.json({ ok: true, ...(await sendRandomTelegramFunReply()) });
   } catch (error) {
     next(error);
   }

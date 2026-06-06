@@ -28,6 +28,10 @@
     {
       "path": "/api/telegram/group-digest-cron",
       "schedule": "30 12 * * 1-5"
+    },
+    {
+      "path": "/api/telegram/fun-cron",
+      "schedule": "0 * * * 1-5"
     }
   ]
 }
