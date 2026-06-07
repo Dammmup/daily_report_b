@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "db:bootstrap": "tsx src/bootstrap.ts",
+    "db:rotate-integration-key": "tsx src/rotate-integration-key.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "test": "npm run build && node --test dist/*.test.js dist/http/*.test.js dist/http/security/*.test.js"

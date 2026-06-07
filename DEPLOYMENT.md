@@ -17,6 +17,12 @@ npm run db:bootstrap
 
 The command is idempotent and should be run with the production MongoDB environment variables.
 
+When introducing `INTEGRATION_ENCRYPTION_KEY` to a database that previously used `JWT_SECRET` as the fallback, run:
+
+```bash
+npm run db:rotate-integration-key
+```
+
 Verification before deployment:
 
 ```bash
