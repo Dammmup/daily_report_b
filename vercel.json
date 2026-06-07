@@ -31,7 +31,23 @@
     },
     {
       "path": "/api/telegram/fun-cron",
-      "schedule": "0 * * * 1-5"
+      "schedule": "13 5 * * 1"
+    },
+    {
+      "path": "/api/telegram/fun-cron",
+      "schedule": "47 7 * * 2"
+    },
+    {
+      "path": "/api/telegram/fun-cron",
+      "schedule": "22 9 * * 3"
+    },
+    {
+      "path": "/api/telegram/fun-cron",
+      "schedule": "36 11 * * 4"
+    },
+    {
+      "path": "/api/telegram/fun-cron",
+      "schedule": "8 6 * * 5"
     }
   ]
 }

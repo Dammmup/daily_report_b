@@ -1256,7 +1256,7 @@ async function sendGroupMotivationNow(ctx: Context) {
   }
 }
 
-export async function sendRandomTelegramFunReply() {
+export async function sendRandomTelegramFunReply(options: { forceDue?: boolean } = {}) {
   const bot = getTelegramBot();
   if (!bot) throw new Error("Telegram bot is not configured");
 
@@ -1273,9 +1273,9 @@ export async function sendRandomTelegramFunReply() {
       group.funNextReplyAt = nextRandomFunReplyAt(now);
       await group.save();
       scheduled += 1;
-      continue;
+      if (!options.forceDue) continue;
     }
-    if (group.funNextReplyAt.getTime() > now.getTime()) continue;
+    if (!options.forceDue && group.funNextReplyAt.getTime() > now.getTime()) continue;
 
     const nextReplyAt = nextRandomFunReplyAt(new Date(now.getTime() + 12 * 60 * 60 * 1000));
     const claimed = await TelegramGroupModel.findOneAndUpdate(
@@ -1283,7 +1283,7 @@ export async function sendRandomTelegramFunReply() {
         _id: group._id,
         active: { $ne: false },
         funEnabled: true,
-        funNextReplyAt: { $lte: now }
+        ...(options.forceDue ? {} : { funNextReplyAt: { $lte: now } })
       },
       {
         $set: {

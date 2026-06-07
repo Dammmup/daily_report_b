@@ -243,7 +243,7 @@ telegramRouter.all("/telegram/group-digest-cron", async (req, res, next) => {
 telegramRouter.all("/telegram/fun-cron", async (req, res, next) => {
   try {
     if (!authorizeCron(req, res)) return;
-    res.json({ ok: true, ...(await sendRandomTelegramFunReply()) });
+    res.json({ ok: true, ...(await sendRandomTelegramFunReply({ forceDue: true })) });
   } catch (error) {
     next(error);
   }
