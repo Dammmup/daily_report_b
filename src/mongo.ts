@@ -14,7 +14,6 @@ import {
 } from "./models.js";
 
 let connectPromise: Promise<typeof mongoose> | undefined;
-let bootstrapPromise: Promise<void> | undefined;
 
 export async function connectMongo() {
   if (mongoose.connection.readyState === 1) {
@@ -25,12 +24,9 @@ export async function connectMongo() {
 
   connectPromise ||= mongoose.connect(mongoUri, { dbName: process.env.MONGODB_DB || "dailyreport" });
   await connectPromise;
-
-  bootstrapPromise ||= bootstrapDatabase();
-  await bootstrapPromise;
 }
 
-async function bootstrapDatabase() {
+export async function runDatabaseBootstrap() {
   await migrateLegacyCategories();
   await mergeTelegramShadowUsers();
   await dropLegacyPlanCategoryUniqueIndex();
@@ -255,8 +251,15 @@ async function seedAdmin() {
   const existingAdmin = await UserModel.findOne({ role: "admin" });
   if (existingAdmin) return;
 
-  const adminEmail = process.env.ADMIN_EMAIL || "admin@erp.local";
-  const adminPassword = process.env.ADMIN_PASSWORD || "admin1234";
+  const production = process.env.NODE_ENV === "production" || process.env.VERCEL === "1";
+  const adminEmail = process.env.ADMIN_EMAIL?.trim() || (production ? "" : "admin@erp.local");
+  const adminPassword = process.env.ADMIN_PASSWORD || (production ? "" : "admin1234");
+  if (!adminEmail || !adminPassword) {
+    throw new Error("ADMIN_EMAIL and ADMIN_PASSWORD must be configured before creating the production admin");
+  }
+  if (production && (adminPassword.length < 12 || adminPassword === "change-this-admin-password" || adminPassword === "admin1234")) {
+    throw new Error("ADMIN_PASSWORD must contain at least 12 characters in production");
+  }
 
   await UserModel.create({
     name: "Администратор",

@@ -1,19 +1,12 @@
 import { Router } from "express";
 import { categoryValues, todayIso } from "../../constants.js";
+import { businessWeekStartIso } from "../../date.js";
 import { AttendanceModel, OfficeLocationModel } from "../../models.js";
 import type { Category } from "../../types.js";
 import { auth, type AuthedRequest } from "../middleware/auth.js";
 import { attendanceSchema, officeLocationSchema } from "../schemas.js";
 
 export const attendanceRouter = Router();
-
-function getWeekStart(date = new Date()) {
-  const copy = new Date(date);
-  const day = copy.getDay() || 7;
-  copy.setDate(copy.getDate() - day + 1);
-  copy.setHours(0, 0, 0, 0);
-  return copy.toISOString().slice(0, 10);
-}
 
 function distanceMeters(a: { latitude: number; longitude: number }, b: { latitude: number; longitude: number }) {
   const earthRadius = 6371000;
@@ -55,7 +48,7 @@ attendanceRouter.get("/summary", auth, async (req: AuthedRequest, res) => {
   }
 
   const officeLocation = await findOfficeLocation(req.user!.category);
-  const weekStart = getWeekStart();
+  const weekStart = businessWeekStartIso();
   const attendance = await AttendanceModel.find({ userId: req.user!._id, date: { $gte: weekStart } }).sort({ date: -1 });
   const verifiedDays = new Set(attendance.filter((item) => item.locationStatus === "verified").map((item) => item.date));
   const minWeeklyOfficeDays = officeLocation?.minWeeklyOfficeDays || 2;

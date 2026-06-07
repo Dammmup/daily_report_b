@@ -1,4 +1,5 @@
 import type { Category } from "./types.js";
+import { addIsoDays, businessDateIso } from "./date.js";
 
 export const categoryValues = [
   "data-analytics",
@@ -28,13 +29,11 @@ export const legacyCategoryMap: Record<string, Category> = {
 };
 
 export function todayIso() {
-  return new Date().toISOString().slice(0, 10);
+  return businessDateIso();
 }
 
 export function addDays(date: string, days: number) {
-  const value = new Date(`${date}T00:00:00.000Z`);
-  value.setUTCDate(value.getUTCDate() + days);
-  return value.toISOString().slice(0, 10);
+  return addIsoDays(date, days);
 }
 
 export function randomAvatarColor() {

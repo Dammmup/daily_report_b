@@ -8,3 +8,4 @@ server/data/db.json
 *.log
 verification-*.png
 *.tsbuildinfo
+.vercel

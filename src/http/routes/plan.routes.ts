@@ -8,7 +8,7 @@ import type { Category } from "../../types.js";
 import { buildAssignmentDraft } from "../../services.js";
 import { auth, requireRole, type AuthedRequest } from "../middleware/auth.js";
 import { assignmentApplySchema, planBulkAssignSchema, planSchema, planStepCreateSchema, planStepUpdateSchema, stepArtifactSchema, stepCommentSchema } from "../schemas.js";
-import { publicUser, serializePlan } from "../serializers.js";
+import { serializePlan, userForViewer } from "../serializers.js";
 
 export const planRouter = Router();
 const activePlanStatuses = ["draft", "approved"] as const;
@@ -569,20 +569,22 @@ planRouter.get("/department-plan/steps/:stepId/thread", auth, async (req: Authed
     StepArtifactModel.find({ stepId: step._id }).sort({ createdAt: -1 })
   ]);
   const users = await UserModel.find({ _id: { $in: [...comments.map((item) => item.userId), ...artifacts.map((item) => item.userId)] } });
+  const userById = new Map(users.map((user) => [user.id, user]));
+  const viewer = { id: req.user!.id, role: req.user!.role };
 
   res.json({
     comments: comments.map((comment) => ({
       ...comment.toObject(),
       id: comment.id,
       userId: comment.userId.toString(),
-      user: users.find((user) => user.id === comment.userId.toString()) ? publicUser(users.find((user) => user.id === comment.userId.toString())!) : undefined,
+      user: userById.has(comment.userId.toString()) ? userForViewer(userById.get(comment.userId.toString())!, viewer) : undefined,
       createdAt: comment.createdAt.toISOString()
     })),
     artifacts: artifacts.map((artifact) => ({
       ...artifact.toObject(),
       id: artifact.id,
       userId: artifact.userId.toString(),
-      user: users.find((user) => user.id === artifact.userId.toString()) ? publicUser(users.find((user) => user.id === artifact.userId.toString())!) : undefined,
+      user: userById.has(artifact.userId.toString()) ? userForViewer(userById.get(artifact.userId.toString())!, viewer) : undefined,
       createdAt: artifact.createdAt.toISOString()
     }))
   });
@@ -615,7 +617,13 @@ planRouter.post("/department-plan/steps/:stepId/comments", auth, async (req: Aut
     category: plan.category,
     message: `Добавлен комментарий к шагу "${step.title}"`
   });
-  res.status(201).json({ ...comment.toObject(), id: comment.id, userId: comment.userId.toString(), user: publicUser(req.user!), createdAt: comment.createdAt.toISOString() });
+  res.status(201).json({
+    ...comment.toObject(),
+    id: comment.id,
+    userId: comment.userId.toString(),
+    user: userForViewer(req.user!, { id: req.user!.id, role: req.user!.role }),
+    createdAt: comment.createdAt.toISOString()
+  });
 });
 
 planRouter.post("/department-plan/steps/:stepId/artifacts", auth, async (req: AuthedRequest, res) => {
@@ -645,5 +653,11 @@ planRouter.post("/department-plan/steps/:stepId/artifacts", auth, async (req: Au
     category: plan.category,
     message: `Добавлен артефакт к шагу "${step.title}"`
   });
-  res.status(201).json({ ...artifact.toObject(), id: artifact.id, userId: artifact.userId.toString(), user: publicUser(req.user!), createdAt: artifact.createdAt.toISOString() });
+  res.status(201).json({
+    ...artifact.toObject(),
+    id: artifact.id,
+    userId: artifact.userId.toString(),
+    user: userForViewer(req.user!, { id: req.user!.id, role: req.user!.role }),
+    createdAt: artifact.createdAt.toISOString()
+  });
 });

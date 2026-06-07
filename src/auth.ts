@@ -2,7 +2,22 @@ import crypto from "node:crypto";
 import jwt from "jsonwebtoken";
 import type { UserDocument } from "./models.js";
 
-const jwtSecret = process.env.JWT_SECRET || "dev-dailyreport-secret";
+const passwordIterations = 210_000;
+const passwordKeyLength = 64;
+const passwordDigest = "sha512";
+
+function requiredProductionSecret(name: string, developmentFallback: string) {
+  const value = process.env[name]?.trim();
+  const production = process.env.NODE_ENV === "production" || process.env.VERCEL === "1";
+  const insecureValues = new Set(["change-this-secret", "dev-dailyreport-secret"]);
+  if (value && (!production || !insecureValues.has(value))) return value;
+  if (production) {
+    throw new Error(`${name} must be configured in production`);
+  }
+  return developmentFallback;
+}
+
+const jwtSecret = requiredProductionSecret("JWT_SECRET", "dev-dailyreport-secret");
 
 export function signToken(user: UserDocument) {
   return jwt.sign({ sub: user.id, role: user.role }, jwtSecret, { expiresIn: "14d" });
@@ -44,15 +59,32 @@ export function hashCode(code: string) {
 
 export function hashPassword(password: string): string {
   const salt = crypto.randomBytes(16).toString("hex");
-  const hash = crypto.pbkdf2Sync(password, salt, 1000, 64, "sha512").toString("hex");
-  return `${salt}:${hash}`;
+  const hash = crypto.pbkdf2Sync(password, salt, passwordIterations, passwordKeyLength, passwordDigest).toString("hex");
+  return `pbkdf2$${passwordIterations}$${salt}$${hash}`;
 }
 
 export function verifyPassword(password: string, storedHash: string): boolean {
+  const modern = storedHash.split("$");
+  if (modern.length === 4 && modern[0] === "pbkdf2") {
+    const iterations = Number(modern[1]);
+    const salt = modern[2];
+    const hash = modern[3];
+    if (!Number.isSafeInteger(iterations) || iterations < 1 || !salt || !hash) return false;
+    const checkHash = crypto.pbkdf2Sync(password, salt, iterations, passwordKeyLength, passwordDigest);
+    const expected = Buffer.from(hash, "hex");
+    return expected.length === checkHash.length && crypto.timingSafeEqual(expected, checkHash);
+  }
+
   const [salt, hash] = storedHash.split(":");
   if (!salt || !hash) return false;
-  const checkHash = crypto.pbkdf2Sync(password, salt, 1000, 64, "sha512").toString("hex");
-  return hash === checkHash;
+  const checkHash = crypto.pbkdf2Sync(password, salt, 1000, passwordKeyLength, passwordDigest);
+  const expected = Buffer.from(hash, "hex");
+  return expected.length === checkHash.length && crypto.timingSafeEqual(expected, checkHash);
+}
+
+export function passwordNeedsRehash(storedHash: string) {
+  const [algorithm, iterations] = storedHash.split("$");
+  return algorithm !== "pbkdf2" || Number(iterations) < passwordIterations;
 }
 
 export function verifyTelegramInitData(initData: string) {

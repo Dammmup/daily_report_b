@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { Types } from "mongoose";
+import { todayIso } from "../../constants.js";
 import { AuditLogModel, PlanModel, ReportModel, UserModel } from "../../models.js";
 import { createDailyReport } from "../../services.js";
 import { auth, type AuthedRequest } from "../middleware/auth.js";
@@ -32,7 +33,7 @@ reportRouter.patch("/reports/:id", auth, async (req: AuthedRequest, res) => {
     return;
   }
 
-  if (report.date !== new Date().toISOString().slice(0, 10)) {
+  if (report.date !== todayIso()) {
     res.status(403).json({ message: "Редактировать можно только сегодняшний дэйлик" });
     return;
   }

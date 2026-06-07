@@ -15,6 +15,8 @@ import {
 import type { Category } from "../../types.js";
 import { auth, requireRole, type AuthedRequest } from "../middleware/auth.js";
 import { telegramDigestSchema, telegramMiniAppSessionSchema } from "../schemas.js";
+import { cronAuthorizationStatus } from "../security/cron.js";
+import { setSessionCookie } from "../security/session-cookie.js";
 import { publicUser } from "../serializers.js";
 
 export const telegramRouter = Router();
@@ -85,7 +87,9 @@ telegramRouter.post("/telegram/mini-app-session", async (req, res) => {
   user.lastActiveAt = new Date();
   await user.save();
 
-  res.json({ token: signToken(user), user: publicUser(user) });
+  const token = signToken(user);
+  setSessionCookie(res, token);
+  res.json({ token, user: publicUser(user) });
 });
 
 telegramRouter.get("/telegram/digest", auth, requireRole("lead"), async (req: AuthedRequest, res) => {
@@ -189,12 +193,7 @@ telegramRouter.post("/telegram/webhook/setup", auth, requireRole("admin"), async
 
 telegramRouter.all("/telegram/motivation-cron", async (req, res, next) => {
   try {
-    const secret = process.env.CRON_SECRET;
-    const authHeader = req.header("authorization");
-    if (secret && authHeader !== `Bearer ${secret}` && req.header("x-cron-secret") !== secret && req.query.secret !== secret) {
-      res.status(401).json({ message: "Unauthorized cron request" });
-      return;
-    }
+    if (!authorizeCron(req, res)) return;
 
     const result = await sendWeekdayGroupMotivation();
     res.json({ ok: true, ...result });
@@ -251,9 +250,16 @@ telegramRouter.all("/telegram/fun-cron", async (req, res, next) => {
 });
 
 function authorizeCron(req: Request, res: Response) {
-  const secret = process.env.CRON_SECRET;
-  const authHeader = req.header("authorization");
-  if (secret && authHeader !== `Bearer ${secret}` && req.header("x-cron-secret") !== secret && req.query.secret !== secret) {
+  const status = cronAuthorizationStatus({
+    secret: process.env.CRON_SECRET,
+    authorization: req.header("authorization"),
+    cronHeader: req.header("x-cron-secret")
+  });
+  if (status === "unconfigured") {
+    res.status(503).json({ message: "CRON_SECRET is not configured" });
+    return false;
+  }
+  if (status === "unauthorized") {
     res.status(401).json({ message: "Unauthorized cron request" });
     return false;
   }

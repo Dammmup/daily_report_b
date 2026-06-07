@@ -224,9 +224,17 @@ export async function exchangeOAuthCode(input: {
 }
 
 function encryptionKey() {
+  const production = process.env.NODE_ENV === "production" || process.env.VERCEL === "1";
+  const secret =
+    process.env.INTEGRATION_ENCRYPTION_KEY?.trim() ||
+    process.env.JWT_SECRET?.trim() ||
+    (production ? "" : "dev-dailyreport-secret");
+  if (!secret || (production && ["change-this-secret", "dev-dailyreport-secret"].includes(secret))) {
+    throw new Error("INTEGRATION_ENCRYPTION_KEY or JWT_SECRET must be securely configured in production");
+  }
   return crypto
     .createHash("sha256")
-    .update(process.env.INTEGRATION_ENCRYPTION_KEY || process.env.JWT_SECRET || "dev-dailyreport-secret")
+    .update(secret)
     .digest();
 }
 

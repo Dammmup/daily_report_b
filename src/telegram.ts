@@ -2,6 +2,7 @@ import { Markup, Telegraf, type Context } from "telegraf";
 import { hashPassword } from "./auth.js";
 import { askGroqAssistant, askGroqTelegramAssistant, transcribeAudio } from "./ai.js";
 import { categories, randomAvatarColor } from "./constants.js";
+import { addIsoDays, businessDateIso, businessDateTime, businessTime, businessWeekday, isSameBusinessDay } from "./date.js";
 import { PlanChangeModel, PlanModel, ReportModel, TelegramActivityModel, TelegramDraftModel, TelegramGroupModel, UserModel } from "./models.js";
 import { createDailyReport, formatLeadSummary } from "./services.js";
 import type { Category } from "./types.js";
@@ -19,7 +20,6 @@ let digestTimer: NodeJS.Timeout | undefined;
 let funTimer: NodeJS.Timeout | undefined;
 const temporaryGroupMessageTtlMs = Number(process.env.TELEGRAM_TEMP_MESSAGE_TTL_MS || 5000);
 const activePlanFilter = { status: { $in: ["draft", "approved"] as const } } as any;
-const almatyUtcOffsetMs = 5 * 60 * 60 * 1000;
 const funReplyLookbackMs = 72 * 60 * 60 * 1000;
 const telegramAiWindowMs = 10 * 60 * 1000;
 const telegramAiCooldownMs = 20 * 60 * 1000;
@@ -39,15 +39,11 @@ const inlineMenu = Markup.inlineKeyboard([
 const appUrl = process.env.FRONTEND_URL || process.env.APP_URL || "https://daily-report-f.vercel.app";
 
 function todayIso() {
-  return new Date().toISOString().slice(0, 10);
+  return businessDateIso();
 }
 
-function isSameIsoDay(date?: Date | null) {
-  return date?.toISOString().slice(0, 10) === todayIso();
-}
-
-function isWeekdayUtc() {
-  const weekday = new Date().getUTCDay();
+function isBusinessWeekday(date = new Date()) {
+  const weekday = businessWeekday(date);
   return weekday !== 0 && weekday !== 6;
 }
 
@@ -56,17 +52,18 @@ function randomItem<T>(items: readonly T[]): T | undefined {
 }
 
 function nextRandomFunReplyAt(now = new Date()) {
-  const localNow = new Date(now.getTime() + almatyUtcOffsetMs);
-  const localMidnightMs = Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate());
   const minimumLeadMs = 30 * 60 * 1000;
+  const localToday = businessDateIso(now);
 
   for (let dayOffset = 0; dayOffset < 8; dayOffset += 1) {
-    const localDayMs = localMidnightMs + dayOffset * 24 * 60 * 60 * 1000;
-    const weekday = new Date(localDayMs).getUTCDay();
+    const localDay = addIsoDays(localToday, dayOffset);
+    const weekday = new Date(`${localDay}T00:00:00.000Z`).getUTCDay();
     if (weekday === 0 || weekday === 6) continue;
 
     const randomMinute = 10 * 60 + Math.floor(Math.random() * 8 * 60);
-    const candidate = new Date(localDayMs + randomMinute * 60 * 1000 - almatyUtcOffsetMs);
+    const hour = Math.floor(randomMinute / 60);
+    const minute = randomMinute % 60;
+    const candidate = businessDateTime(localDay, `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`);
     if (candidate.getTime() > now.getTime() + minimumLeadMs) return candidate;
   }
 
@@ -1192,15 +1189,14 @@ export async function sendWeekdayGroupMotivation() {
   if (!bot) throw new Error("Telegram bot is not configured");
 
   const now = new Date();
-  const weekday = now.getUTCDay();
-  if (weekday === 0 || weekday === 6) return { sent: 0, skipped: "weekend" };
+  if (!isBusinessWeekday(now)) return { sent: 0, skipped: "weekend" };
 
-  const dayKey = now.toISOString().slice(0, 10);
+  const dayKey = businessDateIso(now);
   const groups = await findAllDepartmentTelegramGroups({ motivationOnly: true });
 
   let sent = 0;
   for (const group of groups) {
-    const lastSentDay = group.motivationLastSentAt?.toISOString().slice(0, 10);
+    const lastSentDay = group.motivationLastSentAt ? businessDateIso(group.motivationLastSentAt) : undefined;
     if (lastSentDay === dayKey) continue;
 
     try {
@@ -1389,13 +1385,13 @@ async function sendGroupDailyDigestNow(ctx: Context) {
 export async function sendWeekdayGroupDailyDigests() {
   const bot = getTelegramBot();
   if (!bot) throw new Error("Telegram bot is not configured");
-  if (!isWeekdayUtc()) return { sent: 0, skipped: "weekend" };
+  if (!isBusinessWeekday()) return { sent: 0, skipped: "weekend" };
 
   const groups = await findAllDepartmentTelegramGroups({ motivationOnly: true });
 
   let sent = 0;
   for (const group of groups) {
-    if (isSameIsoDay(group.groupDigestLastSentAt)) continue;
+    if (isSameBusinessDay(group.groupDigestLastSentAt)) continue;
     try {
       await bot.telegram.sendMessage(group.chatId, await buildGroupDailyDigest(group.category as Category));
       group.groupDigestLastSentAt = new Date();
@@ -1413,7 +1409,7 @@ export async function sendWeekdayGroupDailyDigests() {
 export async function sendWeekdayPersonalFocus() {
   const bot = getTelegramBot();
   if (!bot) throw new Error("Telegram bot is not configured");
-  if (!isWeekdayUtc()) return { sent: 0, skipped: "weekend" };
+  if (!isBusinessWeekday()) return { sent: 0, skipped: "weekend" };
 
   const interns = await UserModel.find({
     role: "intern",
@@ -1423,7 +1419,7 @@ export async function sendWeekdayPersonalFocus() {
 
   let sent = 0;
   for (const user of interns) {
-    if (isSameIsoDay(user.telegramFocusLastSentAt)) continue;
+    if (isSameBusinessDay(user.telegramFocusLastSentAt)) continue;
     if (!user.telegramChatId?.trim()) continue;
     const plans = await findActivePlans(user.category as Category, 5);
     if (!plans.length) continue;
@@ -1471,7 +1467,7 @@ export async function sendWeekdayPersonalFocus() {
 export async function sendWeekdayReportReminders() {
   const bot = getTelegramBot();
   if (!bot) throw new Error("Telegram bot is not configured");
-  if (!isWeekdayUtc()) return { sent: 0, skipped: "weekend" };
+  if (!isBusinessWeekday()) return { sent: 0, skipped: "weekend" };
 
   const interns = await UserModel.find({
     role: "intern",
@@ -1483,7 +1479,7 @@ export async function sendWeekdayReportReminders() {
 
   let sent = 0;
   for (const user of interns) {
-    if (reportedIds.has(user.id) || isSameIsoDay(user.telegramReportReminderLastSentAt)) continue;
+    if (reportedIds.has(user.id) || isSameBusinessDay(user.telegramReportReminderLastSentAt)) continue;
     if (!user.telegramChatId?.trim()) continue;
     try {
       await bot.telegram.sendMessage(
@@ -2179,8 +2175,8 @@ function startDigestScheduler(bot: Telegraf) {
 
   digestTimer = setInterval(async () => {
     const now = new Date();
-    const currentTime = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-    const dayKey = now.toISOString().slice(0, 10);
+    const currentTime = businessTime(now);
+    const dayKey = businessDateIso(now);
     const leads = await UserModel.find({
       role: "lead",
       telegramChatId: { $type: "string", $ne: "" },
@@ -2189,7 +2185,7 @@ function startDigestScheduler(bot: Telegraf) {
     });
 
     for (const lead of leads) {
-      const lastSentDay = lead.telegramDigestLastSentAt?.toISOString().slice(0, 10);
+      const lastSentDay = lead.telegramDigestLastSentAt ? businessDateIso(lead.telegramDigestLastSentAt) : undefined;
       if (lastSentDay === dayKey) continue;
       try {
         await sendLeadDigest(bot, lead);

@@ -1,4 +1,5 @@
 export * from "./models/audit-log.model.js";
+export * from "./models/auth-throttle.model.js";
 export * from "./models/attendance.model.js";
 export * from "./models/department-change.model.js";
 export * from "./models/external-resource-ai-check.model.js";

@@ -1,12 +1,47 @@
 import { Router } from "express";
-import { generateVerificationCode, hashCode, hashPassword, signToken, verifyPassword } from "../../auth.js";
+import type { Request, Response } from "express";
+import { generateVerificationCode, hashCode, hashPassword, passwordNeedsRehash, signToken, verifyPassword } from "../../auth.js";
 import { randomAvatarColor } from "../../constants.js";
 import { sendVerificationEmail } from "../../mailer.js";
 import { UserModel, VerificationCodeModel } from "../../models.js";
 import { loginSchema, requestCodeSchema, verifyEmailSchema } from "../schemas.js";
+import { clearThrottle, consumeThrottle, requestIp } from "../security/auth-throttle.js";
+import { clearSessionCookie, setSessionCookie } from "../security/session-cookie.js";
 import { publicUser } from "../serializers.js";
 
 export const authRouter = Router();
+const authWindowMs = 15 * 60 * 1000;
+const dummyPasswordHash = hashPassword("not-a-real-user-password");
+
+async function allowAuthRequest(
+  req: Request,
+  res: Response,
+  input: { scope: string; identity: string; identityLimit: number; ipLimit: number; blockMs?: number }
+) {
+  const blockMs = input.blockMs || authWindowMs;
+  const [identityResult, ipResult] = await Promise.all([
+    consumeThrottle({
+      scope: `${input.scope}:identity`,
+      identity: input.identity,
+      limit: input.identityLimit,
+      windowMs: authWindowMs,
+      blockMs
+    }),
+    consumeThrottle({
+      scope: `${input.scope}:ip`,
+      identity: requestIp(req),
+      limit: input.ipLimit,
+      windowMs: authWindowMs,
+      blockMs
+    })
+  ]);
+  const denied = !identityResult.allowed ? identityResult : !ipResult.allowed ? ipResult : null;
+  if (!denied) return true;
+
+  res.setHeader("Retry-After", String(denied.retryAfterSeconds));
+  res.status(429).json({ message: "Слишком много попыток. Попробуйте позже." });
+  return false;
+}
 
 const socialSourcePatterns = [
   { source: "telegram", patterns: ["telegram", "t.me", "telegra.ph"] },
@@ -61,6 +96,17 @@ authRouter.post("/request-code", async (req, res) => {
 
   const email = body.data.email ? body.data.email.toLowerCase() : undefined;
   const phone = body.data.phone ? body.data.phone.trim() : undefined;
+  const contact = email || phone!;
+  const allowDevCode =
+    process.env.ALLOW_DEV_VERIFICATION_CODE === "true" &&
+    process.env.NODE_ENV !== "production" &&
+    process.env.VERCEL !== "1";
+  if (!email && !allowDevCode) {
+    res.status(503).json({ message: "Подтверждение телефона пока не настроено. Используйте email." });
+    return;
+  }
+  if (!(await allowAuthRequest(req, res, { scope: "request-code", identity: contact, identityLimit: 3, ipLimit: 100 }))) return;
+
   const passwordHash = hashPassword(body.data.password);
   const attribution = registrationAttribution(body.data.registrationMeta);
 
@@ -100,16 +146,16 @@ authRouter.post("/request-code", async (req, res) => {
   }
 
   const code = generateVerificationCode();
+  await VerificationCodeModel.deleteMany({ email: contact, usedAt: { $exists: false } });
   await VerificationCodeModel.create({
-    email: email || phone,
+    email: contact,
     codeHash: hashCode(code),
     expiresAt: new Date(Date.now() + 1000 * 60 * 15)
   });
 
-  let delivery = { delivered: false, devCode: code };
+  let delivery: { delivered: boolean; devCode?: string } = { delivered: false, devCode: allowDevCode ? code : undefined };
   if (email) {
     delivery = await sendVerificationEmail(email, code);
-    const allowDevCode = process.env.ALLOW_DEV_VERIFICATION_CODE === "true" || process.env.NODE_ENV !== "production";
     if (!delivery.delivered && !allowDevCode) {
       res.status(500).json({ message: "Не удалось отправить код подтверждения на почту." });
       return;
@@ -133,6 +179,7 @@ authRouter.post("/verify", async (req, res) => {
   const email = body.data.email ? body.data.email.toLowerCase() : undefined;
   const phone = body.data.phone ? body.data.phone.trim() : undefined;
   const contact = email || phone;
+  if (!(await allowAuthRequest(req, res, { scope: "verify-code", identity: contact!, identityLimit: 6, ipLimit: 120 }))) return;
 
   const verification = await VerificationCodeModel.findOne({
     email: contact,
@@ -159,7 +206,10 @@ authRouter.post("/verify", async (req, res) => {
   user.emailVerified = true;
   user.lastActiveAt = new Date();
   await Promise.all([verification.save(), user.save()]);
-  res.json({ token: signToken(user), user: publicUser(user) });
+  await clearThrottle("verify-code:identity", contact!);
+  const token = signToken(user);
+  setSessionCookie(res, token);
+  res.json({ token, user: publicUser(user) });
 });
 
 authRouter.post("/login", async (req, res) => {
@@ -170,12 +220,17 @@ authRouter.post("/login", async (req, res) => {
   }
 
   const identifier = body.data.identifier.trim();
+  const normalizedIdentifier = identifier.toLowerCase();
+  if (!(await allowAuthRequest(req, res, { scope: "login", identity: normalizedIdentifier, identityLimit: 8, ipLimit: 150, blockMs: 30 * 60 * 1000 }))) {
+    return;
+  }
   const user = await UserModel.findOne({
-    $or: [{ email: identifier.toLowerCase() }, { phone: identifier }]
+    $or: [{ email: normalizedIdentifier }, { phone: identifier }]
   });
 
-  if (!user) {
-    res.status(404).json({ message: "Пользователь не найден. Пожалуйста, пройдите регистрацию." });
+  const passwordValid = verifyPassword(body.data.password, user?.passwordHash || dummyPasswordHash);
+  if (!user || !passwordValid) {
+    res.status(401).json({ message: "Неверный логин или пароль" });
     return;
   }
 
@@ -184,12 +239,16 @@ authRouter.post("/login", async (req, res) => {
     return;
   }
 
-  if (!verifyPassword(body.data.password, user.passwordHash)) {
-    res.status(401).json({ message: "Неверный пароль" });
-    return;
-  }
-
+  if (passwordNeedsRehash(user.passwordHash)) user.passwordHash = hashPassword(body.data.password);
   user.lastActiveAt = new Date();
   await user.save();
-  res.json({ token: signToken(user), user: publicUser(user) });
+  await clearThrottle("login:identity", normalizedIdentifier);
+  const token = signToken(user);
+  setSessionCookie(res, token);
+  res.json({ token, user: publicUser(user) });
+});
+
+authRouter.post("/logout", (_req, res) => {
+  clearSessionCookie(res);
+  res.json({ ok: true });
 });

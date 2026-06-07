@@ -31,7 +31,7 @@ export const requestCodeSchema = z
   .object({
     email: z.string().email().optional().or(z.literal("")),
     phone: z.string().min(5).optional().or(z.literal("")),
-    password: z.string().min(4),
+    password: z.string().min(8).max(128),
     name: z.string().min(2),
     registrationMeta: z
       .object({
@@ -59,7 +59,7 @@ export const verifyEmailSchema = z
 
 export const loginSchema = z.object({
   identifier: z.string().min(3),
-  password: z.string().min(4)
+  password: z.string().min(4).max(128)
 });
 
 export const attendanceSchema = z.object({
@@ -186,7 +186,7 @@ export const profileUpdateSchema = z.object({
 
 export const passwordChangeSchema = z.object({
   currentPassword: z.string().min(4),
-  newPassword: z.string().min(4)
+  newPassword: z.string().min(8).max(128)
 });
 
 export const stepCommentSchema = z.object({

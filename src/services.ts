@@ -1,6 +1,7 @@
 import type { Types } from "mongoose";
 import { askGroqAssistant, reviewReport } from "./ai.js";
 import { addDays, categories, todayIso } from "./constants.js";
+import { businessHour, businessWeekStartIso } from "./date.js";
 import { AttendanceModel, PlanModel, ReportModel, StepArtifactModel, SurveyModel, UserModel, type UserDocument } from "./models.js";
 import type { AssignmentDraft, Category, DecisionCenter, PlanFitCandidate } from "./types.js";
 
@@ -97,7 +98,7 @@ export async function createDailyReport(input: {
     blockers: input.blockers,
     linkedStepIds,
     source: input.source,
-    status: now.getHours() >= 10 ? "late" : "submitted",
+    status: businessHour(now) >= 10 ? "late" : "submitted",
     aiReview
   });
 
@@ -175,9 +176,10 @@ export async function buildDashboard(category?: Category) {
     const plan = userPlans[0];
     const userAttendance = attendanceByUser.get(user.id) || [];
     const officeAttendanceCount = userAttendance.filter((item) => item.locationStatus === "verified").length;
+    const weekStart = businessWeekStartIso();
     const currentWeekOfficeDays = new Set(
       userAttendance
-        .filter((item) => item.locationStatus === "verified" && item.date >= todayIso().slice(0, 8) + "01")
+        .filter((item) => item.locationStatus === "verified" && item.date >= weekStart)
         .map((item) => item.date)
     ).size;
 
@@ -251,7 +253,7 @@ export async function buildInternAiProfile(userId: string) {
       officeAttendanceCount: attendance.filter((item) => item.locationStatus === "verified").length,
       currentWeekOfficeDays: new Set(
         attendance
-          .filter((item) => item.locationStatus === "verified" && item.date >= todayIso().slice(0, 8) + "01")
+          .filter((item) => item.locationStatus === "verified" && item.date >= businessWeekStartIso())
           .map((item) => item.date)
       ).size,
       blockerReports: blockerReports.length,

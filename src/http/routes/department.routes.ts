@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { businessDateIso } from "../../date.js";
 import { AuditLogModel, DepartmentChangeModel } from "../../models.js";
 import { auth, type AuthedRequest } from "../middleware/auth.js";
 import { departmentSchema } from "../schemas.js";
@@ -35,8 +36,8 @@ departmentRouter.post("/department", auth, async (req: AuthedRequest, res) => {
     return;
   }
 
-  const today = new Date().toISOString().slice(0, 10);
-  if (req.user!.lastDepartmentChangedAt?.toISOString().slice(0, 10) === today) {
+  const today = businessDateIso();
+  if (req.user!.lastDepartmentChangedAt && businessDateIso(req.user!.lastDepartmentChangedAt) === today) {
     res.status(429).json({ message: "Стажер может менять департамент только один раз в день" });
     return;
   }

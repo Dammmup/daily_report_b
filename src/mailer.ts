@@ -6,10 +6,14 @@ export async function sendVerificationEmail(email: string, code: string) {
   const user = process.env.SMTP_USER;
   const pass = process.env.SMTP_PASS;
   const from = process.env.SMTP_FROM || "DailyReport ERP <no-reply@dailyreport.local>";
+  const allowDevCode =
+    process.env.ALLOW_DEV_VERIFICATION_CODE === "true" &&
+    process.env.NODE_ENV !== "production" &&
+    process.env.VERCEL !== "1";
 
   if (!host || !user || !pass) {
-    console.log(`[email verification] ${email}: ${code}`);
-    return { delivered: false, devCode: code };
+    if (allowDevCode) console.log(`[email verification] ${email}: ${code}`);
+    return { delivered: false, devCode: allowDevCode ? code : undefined };
   }
 
   const transporter = nodemailer.createTransport({
@@ -28,9 +32,9 @@ export async function sendVerificationEmail(email: string, code: string) {
       html: `<p>Ваш код подтверждения: <strong>${code}</strong></p><p>Код действует 15 минут.</p>`
     });
 
-    return { delivered: true, devCode: code };
+    return { delivered: true, devCode: undefined };
   } catch (error) {
     console.error("Ошибка при отправке почты (SMTP):", error);
-    return { delivered: false, devCode: code };
+    return { delivered: false, devCode: allowDevCode ? code : undefined };
   }
 }

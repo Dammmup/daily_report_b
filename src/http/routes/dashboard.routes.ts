@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { todayIso } from "../../constants.js";
 import { AuditLogModel, AttendanceModel, PlanModel, ReportModel, UserModel } from "../../models.js";
 import { buildAiSummary, buildDashboard, buildDecisionCenter, buildInternAiProfile, formatLeadSummary } from "../../services.js";
 import type { Category } from "../../types.js";
@@ -66,7 +67,7 @@ dashboardRouter.get("/risk-center", auth, async (req: AuthedRequest, res) => {
 
   const category = userScope(req);
   const dashboard = await buildDashboard(category);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayIso();
   const plans = await PlanModel.find({ ...(category ? { category } : {}), status: { $in: ["draft", "approved"] } } as any);
   const overdueSteps = plans.flatMap((plan) =>
     plan.steps

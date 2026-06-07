@@ -1,25 +1,32 @@
 import { categories } from "../constants.js";
+import { businessDateIso } from "../date.js";
 import type { PlanModel, ReportModel, UserDocument } from "../models.js";
-import type { Category } from "../types.js";
+import type { Category, Role } from "../types.js";
 
 type ReportDocument = NonNullable<Awaited<ReturnType<typeof ReportModel.findOne>>>;
 type PlanDocument = NonNullable<Awaited<ReturnType<typeof PlanModel.findOne>>>;
 
 function isStepOverdue(step: { deadline: string; status: string }) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = businessDateIso();
   return step.deadline < today && step.status !== "done" && step.status !== "canceled";
 }
 
-export function publicUser(user: UserDocument) {
+export function memberUser(user: UserDocument) {
   return {
     id: user.id,
     name: user.name,
-    email: user.email,
     role: user.role,
     category: user.category || undefined,
     categoryLabel: user.category ? categories[user.category as Category] : undefined,
     avatarColor: user.avatarColor,
-    avatarUrl: user.avatarUrl,
+    avatarUrl: user.avatarUrl
+  };
+}
+
+export function publicUser(user: UserDocument) {
+  return {
+    ...memberUser(user),
+    email: user.email,
     bio: user.bio,
     firstLoginCompleted: user.firstLoginCompleted,
     emailVerified: user.emailVerified,
@@ -44,6 +51,10 @@ export function publicUser(user: UserDocument) {
     createdAt: user.createdAt.toISOString(),
     updatedAt: user.updatedAt.toISOString()
   };
+}
+
+export function userForViewer(user: UserDocument, viewer: { id: string; role: Role }) {
+  return viewer.role === "lead" || viewer.role === "admin" || viewer.id === user.id ? publicUser(user) : memberUser(user);
 }
 
 export function serializeReport(report: ReportDocument | null) {
