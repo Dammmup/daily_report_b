@@ -311,12 +311,26 @@ export async function formatLeadSummary(category?: Category, content: "productiv
     .map((intern) => `${intern.name}: ${intern.averageScore}%`)
     .join(", ");
 
+  const internNameById = new Map(dashboard.interns.map((intern) => [intern.id, intern.name]));
+  const todayBlockers = dashboard.reports
+    .filter((report) => report.date === todayIso() && report.blockers.trim().length > 0)
+    .slice(0, 5)
+    .map((report) => `${internNameById.get(report.userId.toString()) || "Стажер"}: ${report.blockers.trim().slice(0, 120)}`)
+    .join("; ");
+
   const header = category ? `Сводка по департаменту: ${categories[category]}` : "Сводка по всем стажерам";
   const productivity = [
     header,
     `Средняя продуктивность: ${dashboard.stats.averageScore}%`,
     weak ? `Зона внимания: ${weak}` : "Зона внимания: критичных просадок нет",
-    `Вывод: ${dashboard.stats.averageScore >= 70 ? "день выглядит продуктивным" : "дню нужна дополнительная проверка"}`
+    todayBlockers ? `Блокеры сегодня: ${todayBlockers}` : "Блокеры сегодня: не заявлены",
+    `Вывод: ${
+      todayBlockers
+        ? "есть блокеры, дню нужна дополнительная проверка"
+        : dashboard.stats.averageScore >= 70
+          ? "день выглядит продуктивным"
+          : "дню нужна дополнительная проверка"
+    }`
   ];
 
   const reports = [

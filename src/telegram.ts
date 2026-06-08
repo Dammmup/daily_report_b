@@ -105,10 +105,11 @@ function parseReport(text: string) {
     .map((part) => part.trim());
 
   if (lines.length < 2) return null;
+  const blockers = lines[2] || "";
   return {
     yesterday: lines[0],
     todayPlan: lines[1],
-    blockers: lines[2] || ""
+    blockers: /^(нет|нету|-|no|none)\.?$/i.test(blockers) ? "" : blockers
   };
 }
 
