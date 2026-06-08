@@ -169,6 +169,15 @@ async function findVerifiedUserForTelegramShadow(shadow: Awaited<ReturnType<type
   return phoneticMatches.length === 1 ? phoneticMatches[0] : null;
 }
 
+async function telegramIdentityIsAvailable(field: "telegramUserId" | "telegramUsername", value: string | undefined | null, targetId: unknown, shadowId: unknown) {
+  if (!value) return false;
+  const owner = await UserModel.findOne({
+    _id: { $nin: [targetId, shadowId] },
+    [field]: value
+  }).select("_id name");
+  return !owner;
+}
+
 async function mergeTelegramShadowUsers() {
   const shadows = await UserModel.find({
     registrationSource: "telegram_group",
@@ -181,45 +190,54 @@ async function mergeTelegramShadowUsers() {
     const target = await findVerifiedUserForTelegramShadow(shadow);
     if (!target) continue;
 
-    target.telegramChatId = target.telegramChatId || shadow.telegramChatId;
-    target.telegramUserId = target.telegramUserId || shadow.telegramUserId;
-    target.telegramUsername = target.telegramUsername || shadow.telegramUsername;
-    target.telegramGroupChatId = target.telegramGroupChatId || shadow.telegramGroupChatId;
-    target.telegramActivityMessages = Math.max(target.telegramActivityMessages || 0, shadow.telegramActivityMessages || 0);
-    target.telegramActivityScore = Math.max(target.telegramActivityScore || 0, shadow.telegramActivityScore || 0);
-    target.telegramActivitySummary = target.telegramActivitySummary || shadow.telegramActivitySummary || "";
-    target.telegramLastGroupSeenAt = target.telegramLastGroupSeenAt || shadow.telegramLastGroupSeenAt;
-    target.lastActiveAt = target.lastActiveAt > shadow.lastActiveAt ? target.lastActiveAt : shadow.lastActiveAt;
+    try {
+      const canCarryTelegramUserId =
+        !target.telegramUserId && (await telegramIdentityIsAvailable("telegramUserId", shadow.telegramUserId, target._id, shadow._id));
+      const canCarryTelegramUsername =
+        !target.telegramUsername && (await telegramIdentityIsAvailable("telegramUsername", shadow.telegramUsername, target._id, shadow._id));
 
-    await Promise.all([
-      TelegramActivityModel.updateMany({ userId: shadow._id }, { $set: { userId: target._id } }),
-      ReportModel.updateMany({ userId: shadow._id }, { $set: { userId: target._id } }),
-      AttendanceModel.updateMany({ userId: shadow._id }, { $set: { userId: target._id } }),
-      SurveyModel.updateMany({ userId: shadow._id }, { $set: { userId: target._id } }),
-      StepCommentModel.updateMany({ userId: shadow._id }, { $set: { userId: target._id } }),
-      StepArtifactModel.updateMany({ userId: shadow._id }, { $set: { userId: target._id } }),
-      AuditLogModel.updateMany({ actorId: shadow._id }, { $set: { actorId: target._id } }),
-      PlanModel.updateMany(
-        { "steps.assignedTo": shadow._id },
-        { $set: { "steps.$[step].assignedTo": target._id } },
-        { arrayFilters: [{ "step.assignedTo": shadow._id }] }
-      )
-    ]);
+      target.telegramChatId = target.telegramChatId || shadow.telegramChatId;
+      if (canCarryTelegramUserId) target.telegramUserId = shadow.telegramUserId;
+      if (canCarryTelegramUsername) target.telegramUsername = shadow.telegramUsername;
+      target.telegramGroupChatId = target.telegramGroupChatId || shadow.telegramGroupChatId;
+      target.telegramActivityMessages = Math.max(target.telegramActivityMessages || 0, shadow.telegramActivityMessages || 0);
+      target.telegramActivityScore = Math.max(target.telegramActivityScore || 0, shadow.telegramActivityScore || 0);
+      target.telegramActivitySummary = target.telegramActivitySummary || shadow.telegramActivitySummary || "";
+      target.telegramLastGroupSeenAt = target.telegramLastGroupSeenAt || shadow.telegramLastGroupSeenAt;
+      target.lastActiveAt = target.lastActiveAt > shadow.lastActiveAt ? target.lastActiveAt : shadow.lastActiveAt;
 
-    await UserModel.updateOne(
-      { _id: shadow._id },
-      {
-        $unset: {
-          telegramUserId: "",
-          telegramUsername: "",
-          telegramChatId: "",
-          telegramLinkToken: ""
+      await Promise.all([
+        TelegramActivityModel.updateMany({ userId: shadow._id }, { $set: { userId: target._id } }),
+        ReportModel.updateMany({ userId: shadow._id }, { $set: { userId: target._id } }),
+        AttendanceModel.updateMany({ userId: shadow._id }, { $set: { userId: target._id } }),
+        SurveyModel.updateMany({ userId: shadow._id }, { $set: { userId: target._id } }),
+        StepCommentModel.updateMany({ userId: shadow._id }, { $set: { userId: target._id } }),
+        StepArtifactModel.updateMany({ userId: shadow._id }, { $set: { userId: target._id } }),
+        AuditLogModel.updateMany({ actorId: shadow._id }, { $set: { actorId: target._id } }),
+        PlanModel.updateMany(
+          { "steps.assignedTo": shadow._id },
+          { $set: { "steps.$[step].assignedTo": target._id } },
+          { arrayFilters: [{ "step.assignedTo": shadow._id }] }
+        )
+      ]);
+
+      await UserModel.updateOne(
+        { _id: shadow._id },
+        {
+          $unset: {
+            telegramUserId: "",
+            telegramUsername: "",
+            telegramChatId: "",
+            telegramLinkToken: ""
+          }
         }
-      }
-    );
-    await target.save();
-    await UserModel.deleteOne({ _id: shadow._id });
-    merged += 1;
+      );
+      await target.save();
+      await UserModel.deleteOne({ _id: shadow._id });
+      merged += 1;
+    } catch (error) {
+      console.warn(`MongoDB migration skipped Telegram shadow user ${shadow._id}:`, error);
+    }
   }
 
   if (merged) console.log(`MongoDB migrated: merged ${merged} Telegram shadow users.`);
