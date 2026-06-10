@@ -3,6 +3,7 @@ import { askGroqAssistant, reviewReport } from "./ai.js";
 import { addDays, categories, todayIso } from "./constants.js";
 import { businessHour, businessWeekStartIso } from "./date.js";
 import { AttendanceModel, PlanModel, ReportModel, StepArtifactModel, SurveyModel, UserModel, type UserDocument } from "./models.js";
+import { publicUser } from "./http/serializers.js";
 import type { AssignmentDraft, Category, DecisionCenter, PlanFitCandidate } from "./types.js";
 
 const activePlanFilter = { status: { $in: ["draft", "approved"] as const } } as any;
@@ -33,31 +34,9 @@ function buildPlanProgress(plan?: Awaited<ReturnType<typeof PlanModel.findOne>> 
   };
 }
 
-export function publicUser(user: UserDocument) {
-  return {
-    id: user.id,
-    name: user.name,
-    email: user.email,
-    role: user.role,
-    category: user.category || undefined,
-    categoryLabel: user.category ? categories[user.category as Category] : undefined,
-    avatarColor: user.avatarColor,
-    firstLoginCompleted: user.firstLoginCompleted,
-    emailVerified: user.emailVerified,
-    telegramLinked: Boolean(user.telegramChatId),
-    telegramUserId: user.telegramUserId || undefined,
-    telegramUsername: user.telegramUsername || undefined,
-    registrationSource: user.registrationSource || undefined,
-    registrationReferrer: user.registrationReferrer || undefined,
-    registrationUtmSource: user.registrationUtmSource || undefined,
-    registrationUtmMedium: user.registrationUtmMedium || undefined,
-    registrationUtmCampaign: user.registrationUtmCampaign || undefined,
-    registrationSocialSource: user.registrationSocialSource || undefined,
-    lastActiveAt: user.lastActiveAt.toISOString(),
-    createdAt: user.createdAt.toISOString(),
-    updatedAt: user.updatedAt.toISOString()
-  };
-}
+// Единый сериализатор пользователя — переиспользуем из http/serializers, чтобы поля не
+// расходились между дашбордами (services) и роутами.
+export { publicUser };
 
 export async function createDailyReport(input: {
   userId: Types.ObjectId | string;
@@ -90,17 +69,27 @@ export async function createDailyReport(input: {
         )
       : [];
 
-  const report = await ReportModel.create({
-    userId: input.userId,
-    date: todayIso(),
-    yesterday: input.yesterday,
-    todayPlan: input.todayPlan,
-    blockers: input.blockers,
-    linkedStepIds,
-    source: input.source,
-    status: businessHour(now) >= 10 ? "late" : "submitted",
-    aiReview
-  });
+  let report;
+  try {
+    report = await ReportModel.create({
+      userId: input.userId,
+      date: todayIso(),
+      yesterday: input.yesterday,
+      todayPlan: input.todayPlan,
+      blockers: input.blockers,
+      linkedStepIds,
+      source: input.source,
+      status: businessHour(now) >= 10 ? "late" : "submitted",
+      aiReview
+    });
+  } catch (error) {
+    // Уникальный индекс {userId,date}: параллельная вторая отправка ловится здесь,
+    // даже если обе прошли раннюю проверку existingToday во время медленного AI-вызова.
+    if (error instanceof Error && "code" in error && (error as { code?: number }).code === 11000) {
+      throw new Error("Дэйлик за сегодня уже отправлен. Если нужно исправить отчет, обратитесь к тимлиду.");
+    }
+    throw error;
+  }
 
   if (user.role === "intern" && plans.length && linkedStepIds.length && aiReview.deadlineImpactDays > 0) {
     const affectedPlanIds = new Set(

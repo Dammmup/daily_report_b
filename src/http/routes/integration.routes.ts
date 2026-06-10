@@ -499,8 +499,22 @@ integrationRouter.get("/integrations/resources", auth, requireRole("lead", "admi
     query.linkedEntityType = linkedEntityType;
     query.linkedEntityId = linkedEntityId;
   }
-  if (planId) query.planId = planId;
-  if (req.user!.role !== "admin") query.category = req.user!.category;
+  // planId — ObjectId-поле: невалидную строку не пускаем в запрос (иначе CastError → 500).
+  if (planId) {
+    if (!Types.ObjectId.isValid(planId)) {
+      res.json([]);
+      return;
+    }
+    query.planId = planId;
+  }
+  if (req.user!.role !== "admin") {
+    // Лид без департамента не должен видеть ресурсы без категории — возвращаем пусто.
+    if (!req.user!.category) {
+      res.json([]);
+      return;
+    }
+    query.category = req.user!.category;
+  }
 
   const resources = await ExternalResourceModel.find(query).sort({ createdAt: -1 });
   const latestChecks = await ExternalResourceAiCheckModel.find({ resourceId: { $in: resources.map((resource) => resource._id) } }).sort({ createdAt: -1 });

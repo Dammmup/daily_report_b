@@ -1,5 +1,5 @@
 import cors from "cors";
-import express from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
 import { errorHandler } from "./http/middleware/error-handler.js";
 import { apiRouter } from "./http/routes/index.js";
 
@@ -21,6 +21,23 @@ export function isOriginAllowed(origin: string | undefined, origins = configured
   return !origin || origins.has(origin.replace(/\/$/, ""));
 }
 
+const safeMethods = new Set(["GET", "HEAD", "OPTIONS"]);
+
+// CSRF-защита через проверку Origin: мутирующий запрос с чужим Origin отклоняется.
+// Запросы без Origin (Telegram webhook, cron, server-to-server) проходят — они не несут
+// браузерных cookie жертвы, а аутентифицируются собственными секретами.
+export function originCsrfGuard(origins = configuredAllowedOrigins()) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (safeMethods.has(req.method)) return next();
+    const origin = req.header("origin");
+    if (origin && !origins.has(origin.replace(/\/$/, ""))) {
+      res.status(403).json({ message: "Запрос отклонён: недопустимый источник" });
+      return;
+    }
+    next();
+  };
+}
+
 export function createApp() {
   const app = express();
   const origins = configuredAllowedOrigins();
@@ -38,6 +55,7 @@ export function createApp() {
       }
     })
   );
+  app.use(originCsrfGuard(origins));
   app.use(express.json({ limit: "10mb" }));
   app.get("/", (_req, res) => {
     res.json({ ok: true, service: "dailyreport-api", health: "/api/health" });

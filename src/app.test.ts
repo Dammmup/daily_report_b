@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Response } from "express";
-import { configuredAllowedOrigins, isOriginAllowed } from "./app.js";
+import type { NextFunction, Request, Response } from "express";
+import { configuredAllowedOrigins, isOriginAllowed, originCsrfGuard } from "./app.js";
 import { clearSessionCookie, setSessionCookie } from "./http/security/session-cookie.js";
 
 test("CORS allows only configured frontend origins", () => {
@@ -10,6 +10,39 @@ test("CORS allows only configured frontend origins", () => {
   assert.equal(isOriginAllowed("https://daily-report-f.vercel.app", origins), true);
   assert.equal(isOriginAllowed(undefined, origins), true);
   assert.equal(isOriginAllowed("https://untrusted.example", origins), false);
+});
+
+test("originCsrfGuard blocks mutating requests from foreign origins", () => {
+  const origins = configuredAllowedOrigins();
+  const guard = originCsrfGuard(origins);
+
+  const run = (method: string, origin?: string) => {
+    let status = 0;
+    let nextCalled = false;
+    const req = { method, header: (name: string) => (name.toLowerCase() === "origin" ? origin : undefined) } as unknown as Request;
+    const res = {
+      status(code: number) {
+        status = code;
+        return this;
+      },
+      json() {
+        return this;
+      }
+    } as unknown as Response;
+    guard(req, res, (() => {
+      nextCalled = true;
+    }) as NextFunction);
+    return { status, nextCalled };
+  };
+
+  // Чужой Origin на мутирующем методе — 403.
+  assert.deepEqual(run("POST", "https://evil.example"), { status: 403, nextCalled: false });
+  // Разрешённый Origin — пропускаем.
+  assert.deepEqual(run("POST", "https://daily-report-f.vercel.app"), { status: 0, nextCalled: true });
+  // Без Origin (server-to-server: вебхук/крон) — пропускаем.
+  assert.deepEqual(run("POST", undefined), { status: 0, nextCalled: true });
+  // GET не трогаем даже с чужим Origin.
+  assert.deepEqual(run("GET", "https://evil.example"), { status: 0, nextCalled: true });
 });
 
 test("session helpers set and clear an HttpOnly cookie", () => {

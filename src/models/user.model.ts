@@ -45,6 +45,8 @@ const userSchema = new Schema(
     lastDepartmentChangedAt: { type: Date },
     lastDepartmentChangeReason: { type: String },
     passwordHash: { type: String, required: true },
+    // Версия токена: инкремент инвалидирует все ранее выпущенные JWT (напр. при смене пароля).
+    tokenVersion: { type: Number, default: 0 },
     lastActiveAt: { type: Date, default: Date.now }
   },
   { timestamps: true }

@@ -31,7 +31,39 @@ export async function runDatabaseBootstrap() {
   await mergeTelegramShadowUsers();
   await dropLegacyPlanCategoryUniqueIndex();
   await dropLegacyPlanUserIdUniqueIndex();
+  await dedupeDailyReports();
+  await syncModelIndexes();
   await seedAdmin();
+}
+
+// Удаляем исторические дубликаты дэйликов (userId+date), оставляя самый ранний,
+// иначе уникальный индекс {userId,date} не построится.
+async function dedupeDailyReports() {
+  const duplicates = await ReportModel.aggregate<{ ids: unknown[] }>([
+    { $sort: { createdAt: 1 } },
+    { $group: { _id: { userId: "$userId", date: "$date" }, ids: { $push: "$_id" }, count: { $sum: 1 } } },
+    { $match: { count: { $gt: 1 } } }
+  ]);
+
+  let removed = 0;
+  for (const group of duplicates) {
+    const [, ...extra] = group.ids;
+    if (extra.length) {
+      const result = await ReportModel.deleteMany({ _id: { $in: extra } });
+      removed += result.deletedCount || 0;
+    }
+  }
+  if (removed) console.log(`MongoDB migrated: removed ${removed} duplicate daily report(s).`);
+}
+
+// Приводим индексы коллекции отчётов к схеме (в т.ч. новый уникальный индекс {userId,date}).
+async function syncModelIndexes() {
+  try {
+    await ReportModel.syncIndexes();
+    console.log("MongoDB migrated: report indexes synced.");
+  } catch (error) {
+    console.warn("MongoDB report index sync skipped:", error);
+  }
 }
 
 async function migrateLegacyCategories() {

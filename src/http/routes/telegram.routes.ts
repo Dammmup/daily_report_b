@@ -16,6 +16,7 @@ import type { Category } from "../../types.js";
 import { auth, requireRole, type AuthedRequest } from "../middleware/auth.js";
 import { telegramDigestSchema, telegramMiniAppSessionSchema } from "../schemas.js";
 import { cronAuthorizationStatus } from "../security/cron.js";
+import { telegramWebhookAuthorizationStatus } from "../security/telegram-webhook.js";
 import { setSessionCookie } from "../security/session-cookie.js";
 import { publicUser } from "../serializers.js";
 
@@ -157,6 +158,20 @@ telegramRouter.post("/telegram/groups/:id/primary", auth, requireRole("lead", "a
 });
 
 telegramRouter.post("/telegram/webhook", async (req, res, next) => {
+  const status = telegramWebhookAuthorizationStatus({
+    secret: process.env.TELEGRAM_WEBHOOK_SECRET,
+    headerToken: req.header("x-telegram-bot-api-secret-token") ?? undefined
+  });
+  if (status === "unauthorized") {
+    res.status(401).json({ ok: false });
+    return;
+  }
+  if (status === "unconfigured") {
+    console.warn(
+      "Telegram webhook secret is not configured (TELEGRAM_WEBHOOK_SECRET). The endpoint is accepting unauthenticated updates — set the secret and re-run /telegram/webhook/setup to close this gap."
+    );
+  }
+
   try {
     await handleTelegramWebhook(req.body);
     res.json({ ok: true });
@@ -172,6 +187,14 @@ telegramRouter.post("/telegram/webhook/setup", auth, requireRole("admin"), async
     return;
   }
 
+  const webhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET?.trim();
+  if (!webhookSecret || webhookSecret.length < 16) {
+    res.status(400).json({
+      message: "Задайте TELEGRAM_WEBHOOK_SECRET (минимум 16 символов) в переменных окружения перед настройкой вебхука."
+    });
+    return;
+  }
+
   const webhookUrl = process.env.TELEGRAM_WEBHOOK_URL || `${backendBaseUrl(req)}/api/telegram/webhook`;
   const response = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
     method: "POST",
@@ -179,7 +202,8 @@ telegramRouter.post("/telegram/webhook/setup", auth, requireRole("admin"), async
     body: JSON.stringify({
       url: webhookUrl,
       allowed_updates: telegramWebhookAllowedUpdates,
-      drop_pending_updates: false
+      drop_pending_updates: false,
+      secret_token: webhookSecret
     })
   });
   const result = await response.json();

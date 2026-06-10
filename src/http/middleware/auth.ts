@@ -6,6 +6,9 @@ import { readSessionCookie } from "../security/session-cookie.js";
 
 export type AuthedRequest = Request & { user?: UserDocument };
 
+// Не пишем lastActiveAt в БД чаще, чем раз в это окно — убирает запись на КАЖДЫЙ запрос.
+const lastActiveWriteIntervalMs = 5 * 60 * 1000;
+
 export async function auth(req: AuthedRequest, res: Response, next: NextFunction) {
   const tokens = [
     req.header("authorization")?.replace(/^Bearer\s+/i, ""),
@@ -22,8 +25,16 @@ export async function auth(req: AuthedRequest, res: Response, next: NextFunction
       const user = await UserModel.findById(payload.sub);
       if (!user) continue;
 
-      user.lastActiveAt = new Date();
-      await user.save();
+      // Ревокация: токен с устаревшей версией (например, после смены пароля) недействителен.
+      if ((payload.tokenVersion ?? 0) !== (user.tokenVersion ?? 0)) continue;
+
+      const now = new Date();
+      const lastActive = user.lastActiveAt?.getTime() ?? 0;
+      if (now.getTime() - lastActive >= lastActiveWriteIntervalMs) {
+        // Лёгкое условное обновление вместо полного user.save() на каждый запрос.
+        user.lastActiveAt = now;
+        await UserModel.updateOne({ _id: user._id }, { $set: { lastActiveAt: now } });
+      }
       req.user = user;
       next();
       return;

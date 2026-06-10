@@ -18,13 +18,15 @@ function requiredProductionSecret(name: string, developmentFallback: string) {
 }
 
 const jwtSecret = requiredProductionSecret("JWT_SECRET", "dev-dailyreport-secret");
+// Отдельный секрет для OAuth-state, чтобы не смешивать с секретом сессий. Фолбэк — JWT_SECRET.
+const oauthStateSecret = process.env.OAUTH_STATE_SECRET?.trim() || jwtSecret;
 
 export function signToken(user: UserDocument) {
-  return jwt.sign({ sub: user.id, role: user.role }, jwtSecret, { expiresIn: "14d" });
+  return jwt.sign({ sub: user.id, role: user.role, tokenVersion: user.tokenVersion ?? 0 }, jwtSecret, { expiresIn: "14d" });
 }
 
 export function verifyToken(token: string) {
-  return jwt.verify(token, jwtSecret) as { sub: string; role: string };
+  return jwt.verify(token, jwtSecret) as { sub: string; role: string; tokenVersion?: number };
 }
 
 export function signOAuthState(input: {
@@ -33,12 +35,12 @@ export function signOAuthState(input: {
   category?: string;
   redirectPath?: string;
 }) {
-  return jwt.sign(input, jwtSecret, { expiresIn: "10m" });
+  return jwt.sign(input, oauthStateSecret, { expiresIn: "10m" });
 }
 
 export function verifyOAuthState(token: string) {
   try {
-    return jwt.verify(token, jwtSecret) as {
+    return jwt.verify(token, oauthStateSecret) as {
       provider: string;
       userId: string;
       category?: string;
@@ -111,5 +113,11 @@ export function verifyTelegramInitData(initData: string) {
 
   const userRaw = params.get("user");
   if (!userRaw) return null;
-  return JSON.parse(userRaw) as { id: number; username?: string; first_name?: string; last_name?: string };
+  try {
+    const parsed = JSON.parse(userRaw) as { id?: number; username?: string; first_name?: string; last_name?: string };
+    if (!parsed || typeof parsed.id !== "number") return null;
+    return parsed as { id: number; username?: string; first_name?: string; last_name?: string };
+  } catch {
+    return null;
+  }
 }

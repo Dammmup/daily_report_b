@@ -1,9 +1,10 @@
 import { Router } from "express";
 import crypto from "node:crypto";
-import { hashPassword, verifyPassword } from "../../auth.js";
+import { hashPassword, signToken, verifyPassword } from "../../auth.js";
 import { AuditLogModel } from "../../models.js";
 import { auth, type AuthedRequest } from "../middleware/auth.js";
 import { passwordChangeSchema, profileUpdateSchema } from "../schemas.js";
+import { setSessionCookie } from "../security/session-cookie.js";
 import { publicUser } from "../serializers.js";
 
 export const profileRouter = Router();
@@ -70,7 +71,10 @@ profileRouter.patch("/me/password", auth, async (req: AuthedRequest, res) => {
   }
 
   req.user!.passwordHash = hashPassword(body.data.newPassword);
+  // Отзываем все ранее выпущенные токены, текущей сессии выдаём свежий cookie.
+  req.user!.tokenVersion = (req.user!.tokenVersion ?? 0) + 1;
   await req.user!.save();
+  setSessionCookie(res, signToken(req.user!));
 
   await AuditLogModel.create({
     actorId: req.user!._id,
@@ -81,5 +85,5 @@ profileRouter.patch("/me/password", auth, async (req: AuthedRequest, res) => {
     message: "Пользователь изменил пароль"
   });
 
-  res.json({ ok: true });
+  res.json({ ok: true, token: signToken(req.user!) });
 });

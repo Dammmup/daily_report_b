@@ -17,7 +17,8 @@ const reportSchema = new Schema(
 );
 
 reportSchema.index({ userId: 1, createdAt: -1 });
-reportSchema.index({ userId: 1, date: -1 });
+// Один дэйлик на пользователя в день — защита от гонки/двойной отправки на уровне БД.
+reportSchema.index({ userId: 1, date: -1 }, { unique: true });
 reportSchema.index({ date: 1, userId: 1 });
 
 export const ReportModel = mongoose.model("Report", reportSchema);

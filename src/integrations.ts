@@ -472,10 +472,13 @@ export async function fetchResourceContent(input: {
   externalId: string;
 }): Promise<string> {
   if (!input.externalId || !input.accessToken) return "";
+  // Кодируем идентификатор ресурса: он хранится из пользовательского ввода и подставляется
+  // в путь URL внешнего API — без encode возможна path/param-инъекция.
+  const externalId = encodeURIComponent(input.externalId);
   try {
-    if (input.provider === "google_drive") return await fetchGoogleDriveContent(input.accessToken, input.externalId);
-    if (input.provider === "notion") return await fetchNotionContent(input.accessToken, input.externalId);
-    if (input.provider === "trello") return await fetchTrelloContent(input.accessToken, input.externalId);
+    if (input.provider === "google_drive") return await fetchGoogleDriveContent(input.accessToken, externalId);
+    if (input.provider === "notion") return await fetchNotionContent(input.accessToken, externalId);
+    if (input.provider === "trello") return await fetchTrelloContent(input.accessToken, externalId);
     return "";
   } catch (error) {
     console.error(`Content fetch error for ${input.provider}/${input.externalId}:`, error);

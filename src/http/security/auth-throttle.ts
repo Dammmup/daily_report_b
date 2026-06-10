@@ -15,8 +15,10 @@ function throttleKey(scope: string, identity: string) {
 }
 
 export function requestIp(req: Request) {
-  const forwarded = req.header("x-forwarded-for")?.split(",")[0]?.trim();
-  return forwarded || req.ip || req.socket.remoteAddress || "unknown";
+  // req.ip уже вычисляется Express с учётом `trust proxy` (берёт самый левый недоверенный
+  // адрес из X-Forwarded-For). Не парсим заголовок вручную — иначе клиент мог бы подделать
+  // X-Forwarded-For и обойти лимит по IP.
+  return req.ip || req.socket.remoteAddress || "unknown";
 }
 
 export async function consumeThrottle(rule: ThrottleRule) {

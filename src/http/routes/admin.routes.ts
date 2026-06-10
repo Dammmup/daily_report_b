@@ -4,7 +4,21 @@ import { decomposeProjectPlan } from "../../ai.js";
 import { categories, todayIso } from "../../constants.js";
 import { notifyDepartmentPlanChange, sendTelegramRecoveryBroadcast } from "../../telegram.js";
 import type { Category } from "../../types.js";
-import { PlanModel, UserModel } from "../../models.js";
+import {
+  AttendanceModel,
+  AuditLogModel,
+  DepartmentChangeModel,
+  ExternalResourceModel,
+  IntegrationConnectionModel,
+  PlanModel,
+  ReportModel,
+  StepArtifactModel,
+  StepCommentModel,
+  SurveyModel,
+  TelegramActivityModel,
+  UserModel,
+  VerificationCodeModel
+} from "../../models.js";
 import { buildAiSummary, buildDashboard, buildDecisionCenter, buildInternAiProfile } from "../../services.js";
 import { auth, requireRole, type AuthedRequest } from "../middleware/auth.js";
 import { adminPlanSchema, adminUserUpdateSchema } from "../schemas.js";
@@ -271,5 +285,68 @@ adminRouter.delete("/admin/users/:id/plan", auth, requireRole("admin"), async (r
   }
 
   await PlanModel.deleteOne({ category: user.category });
+  res.json({ ok: true });
+});
+
+adminRouter.delete("/admin/users/:id", auth, requireRole("admin"), async (req: AuthedRequest, res) => {
+  const id = String(req.params.id);
+  if (!Types.ObjectId.isValid(id)) {
+    res.status(404).json({ message: "Пользователь не найден" });
+    return;
+  }
+
+  if (id === req.user!.id) {
+    res.status(400).json({ message: "Нельзя удалить собственный аккаунт администратора" });
+    return;
+  }
+
+  const user = await UserModel.findById(id);
+  if (!user) {
+    res.status(404).json({ message: "Пользователь не найден" });
+    return;
+  }
+
+  // Нельзя удалить последнего администратора.
+  if (user.role === "admin") {
+    const otherAdmins = await UserModel.countDocuments({ role: "admin", _id: { $ne: user._id } });
+    if (otherAdmins === 0) {
+      res.status(400).json({ message: "Нельзя удалить последнего администратора платформы" });
+      return;
+    }
+  }
+
+  // Снимаем пользователя с назначенных шагов во всех планах.
+  await PlanModel.updateMany(
+    { "steps.assignedTo": user._id },
+    { $set: { "steps.$[assigned].assignedTo": null } },
+    { arrayFilters: [{ "assigned.assignedTo": user._id }] }
+  );
+
+  // Удаляем персональные данные пользователя.
+  await Promise.all([
+    ReportModel.deleteMany({ userId: user._id }),
+    AttendanceModel.deleteMany({ userId: user._id }),
+    SurveyModel.deleteMany({ userId: user._id }),
+    StepCommentModel.deleteMany({ userId: user._id }),
+    StepArtifactModel.deleteMany({ userId: user._id }),
+    TelegramActivityModel.deleteMany({ userId: user._id }),
+    DepartmentChangeModel.deleteMany({ userId: user._id }),
+    IntegrationConnectionModel.deleteMany({ connectedByUserId: user._id }),
+    ExternalResourceModel.deleteMany({ createdBy: user._id }),
+    user.email ? VerificationCodeModel.deleteMany({ email: user.email }) : Promise.resolve()
+  ]);
+
+  await UserModel.deleteOne({ _id: user._id });
+
+  await AuditLogModel.create({
+    actorId: req.user!._id,
+    action: "user_deleted",
+    entityType: "user",
+    entityId: id,
+    category: user.category,
+    message: `Администратор удалил пользователя ${user.name}`,
+    meta: { role: user.role, email: user.email }
+  });
+
   res.json({ ok: true });
 });
