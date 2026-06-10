@@ -130,6 +130,111 @@ function activeGroupQuery(query: Record<string, unknown> = {}) {
   return { ...query, active: { $ne: false } };
 }
 
+function isTelegramGroupMigrationError(error: unknown): error is { response: { parameters: { migrate_to_chat_id: number } } } {
+  if (!error || typeof error !== "object") return false;
+  const err = error as any;
+  return (
+    err.response?.error_code === 400 &&
+    /group chat was upgraded/i.test(err.response?.description || "") &&
+    typeof err.response?.parameters?.migrate_to_chat_id === "number"
+  );
+}
+
+async function handleTelegramGroupMigration(
+  oldChatId: string,
+  error: unknown,
+  groupDocument?: any
+): Promise<string | null> {
+  if (!isTelegramGroupMigrationError(error)) return null;
+
+  const newChatId = String(error.response.parameters.migrate_to_chat_id);
+  console.info(`Telegram group migrated: ${oldChatId} -> ${newChatId}. Updating database...`);
+
+  try {
+    const existingNewGroup = await TelegramGroupModel.findOne({ chatId: newChatId });
+    if (existingNewGroup) {
+      if (groupDocument) {
+        if (groupDocument.category && !existingNewGroup.category) {
+          existingNewGroup.category = groupDocument.category;
+        }
+        if (groupDocument.funMedia?.length && !existingNewGroup.funMedia?.length) {
+          existingNewGroup.funMedia = groupDocument.funMedia;
+        }
+        existingNewGroup.active = true;
+        existingNewGroup.motivationEnabled = groupDocument.motivationEnabled;
+        existingNewGroup.funEnabled = groupDocument.funEnabled;
+        await existingNewGroup.save();
+        await TelegramGroupModel.deleteOne({ _id: groupDocument._id });
+
+        groupDocument.chatId = newChatId;
+        groupDocument._id = existingNewGroup._id;
+        groupDocument.isNew = false;
+      } else {
+        const oldGroup = await TelegramGroupModel.findOne({ chatId: oldChatId });
+        if (oldGroup) {
+          if (oldGroup.category && !existingNewGroup.category) {
+            existingNewGroup.category = oldGroup.category;
+          }
+          if (oldGroup.funMedia?.length && !existingNewGroup.funMedia?.length) {
+            existingNewGroup.funMedia = oldGroup.funMedia;
+          }
+          existingNewGroup.active = true;
+          existingNewGroup.motivationEnabled = oldGroup.motivationEnabled;
+          existingNewGroup.funEnabled = oldGroup.funEnabled;
+          await existingNewGroup.save();
+          await TelegramGroupModel.deleteOne({ chatId: oldChatId });
+        }
+      }
+    } else {
+      if (groupDocument) {
+        groupDocument.chatId = newChatId;
+        groupDocument.active = true;
+        await groupDocument.save();
+      } else {
+        await TelegramGroupModel.updateOne(
+          { chatId: oldChatId },
+          { $set: { chatId: newChatId, active: true } }
+        );
+      }
+    }
+
+    await UserModel.updateMany(
+      { telegramGroupChatId: oldChatId },
+      { $set: { telegramGroupChatId: newChatId } }
+    );
+
+    await TelegramActivityModel.updateMany(
+      { chatId: oldChatId },
+      { $set: { chatId: newChatId } }
+    );
+
+    return newChatId;
+  } catch (dbError) {
+    console.error(`Failed to handle telegram group migration in DB for ${oldChatId} -> ${newChatId}`, dbError);
+    if (groupDocument) {
+      groupDocument.chatId = newChatId;
+    }
+    return newChatId;
+  }
+}
+
+async function safeGroupSend<T>(
+  bot: Telegraf,
+  chatId: string,
+  sendFn: (targetChatId: string) => Promise<T>,
+  groupDocument?: any
+): Promise<T> {
+  try {
+    return await sendFn(chatId);
+  } catch (error) {
+    const newChatId = await handleTelegramGroupMigration(chatId, error, groupDocument);
+    if (newChatId) {
+      return await sendFn(newChatId);
+    }
+    throw error;
+  }
+}
+
 function isTelegramInactiveChatError(error: unknown) {
   const message = error instanceof Error ? error.message : JSON.stringify(error);
   return /bot was kicked|bot was blocked|chat not found|forbidden|not enough rights|deactivated/i.test(message);
@@ -1208,11 +1313,11 @@ export async function sendWeekdayGroupMotivation() {
       if (!plansCount || !internsCount || !group.chatId?.trim()) continue;
 
       const message = await buildMotivationMessage(group.category as Category);
-      await bot.telegram.sendMessage(group.chatId, message);
+      await safeGroupSend(bot, group.chatId, (id) => bot.telegram.sendMessage(id, message), group);
       const media = randomItem(group.funMedia as unknown as TelegramFunMedia[]);
       if (group.funEnabled && media) {
         try {
-          await sendTelegramFunMedia(bot, group.chatId, media);
+          await safeGroupSend(bot, group.chatId, (id) => sendTelegramFunMedia(bot, id, media), group);
         } catch (error) {
           console.error("Telegram motivation fun media error", error);
         }
@@ -1250,7 +1355,7 @@ async function sendGroupMotivationNow(ctx: Context) {
   const bot = getTelegramBot();
   if (bot && group.funEnabled && media) {
     try {
-      await sendTelegramFunMedia(bot, group.chatId, media);
+      await safeGroupSend(bot, group.chatId, (id) => sendTelegramFunMedia(bot, id, media), group);
     } catch (error) {
       console.error("Telegram manual motivation fun media error", error);
     }
@@ -1318,7 +1423,7 @@ export async function sendRandomTelegramFunReply(options: { forceDue?: boolean }
     }
 
     try {
-      await sendTelegramFunMedia(bot, claimed.chatId, media, activity.messageId);
+      await safeGroupSend(bot, claimed.chatId, (id) => sendTelegramFunMedia(bot, id, media, activity.messageId ?? undefined), claimed);
       await TelegramActivityModel.updateOne({ _id: activity._id }, { $set: { funRepliedAt: now } });
       claimed.funLastReplyAt = now;
       await claimed.save();
@@ -1394,7 +1499,8 @@ export async function sendWeekdayGroupDailyDigests() {
   for (const group of groups) {
     if (isSameBusinessDay(group.groupDigestLastSentAt)) continue;
     try {
-      await bot.telegram.sendMessage(group.chatId, await buildGroupDailyDigest(group.category as Category));
+      const digestText = await buildGroupDailyDigest(group.category as Category);
+      await safeGroupSend(bot, group.chatId, (id) => bot.telegram.sendMessage(id, digestText), group);
       group.groupDigestLastSentAt = new Date();
       await group.save();
       sent += 1;
@@ -1568,7 +1674,7 @@ export async function notifyDepartmentPlanChange(input: {
   for (const group of groups) {
     try {
       if (!group.chatId?.trim()) continue;
-      await bot.telegram.sendMessage(group.chatId, groupMessage);
+      await safeGroupSend(bot, group.chatId, (id) => bot.telegram.sendMessage(id, groupMessage), group);
       groupSent += 1;
     } catch (error) {
       console.error("Telegram group plan change notification error", error);
@@ -1602,9 +1708,12 @@ export async function sendTelegramRecoveryBroadcast() {
   for (const group of groups) {
     try {
       if (!group.chatId?.trim() || !group.category) continue;
-      await bot.telegram.sendMessage(group.chatId, await buildMotivationMessage(group.category as Category));
+      const motivationText = await buildMotivationMessage(group.category as Category);
+      await safeGroupSend(bot, group.chatId, (id) => bot.telegram.sendMessage(id, motivationText), group);
       const media = randomItem(group.funMedia as unknown as TelegramFunMedia[]);
-      if (group.funEnabled && media) await sendTelegramFunMedia(bot, group.chatId, media);
+      if (group.funEnabled && media) {
+        await safeGroupSend(bot, group.chatId, (id) => sendTelegramFunMedia(bot, id, media), group);
+      }
       motivationMessages += 1;
     } catch (error) {
       console.error("Telegram manual motivation broadcast error", error);
@@ -1637,7 +1746,7 @@ export async function sendTelegramRecoveryBroadcast() {
     for (const group of planGroups) {
       try {
         if (!group.chatId?.trim()) continue;
-        await bot.telegram.sendMessage(group.chatId, message);
+        await safeGroupSend(bot, group.chatId, (id) => bot.telegram.sendMessage(id, message), group);
         sentForPlan += 1;
         planAnnouncementMessages += 1;
       } catch (error) {
@@ -2281,6 +2390,20 @@ bot.start(async (ctx) => {
   bot.on("my_chat_member", (ctx) => handleBotChatMemberUpdate(ctx));
 
   bot.on("message", async (ctx, next) => {
+    if (ctx.message && ("migrate_to_chat_id" in ctx.message || "migrate_from_chat_id" in ctx.message)) {
+      const migrateTo = (ctx.message as any).migrate_to_chat_id;
+      if (migrateTo) {
+        await handleTelegramGroupMigration(String(ctx.chat.id), {
+          response: {
+            error_code: 400,
+            description: "group chat was upgraded to a supergroup chat",
+            parameters: { migrate_to_chat_id: migrateTo }
+          }
+        });
+      }
+      return next();
+    }
+
     if (await handleDraftMessage(ctx)) return;
     await trackNewGroupMembers(ctx);
     const text = getTextFromMessage(ctx);
