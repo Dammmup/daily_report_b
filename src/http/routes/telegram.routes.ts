@@ -218,6 +218,28 @@ telegramRouter.post("/telegram/webhook/setup", auth, requireRole("admin"), async
   res.json({ ok: true, webhookUrl, allowedUpdates: telegramWebhookAllowedUpdates, result });
 });
 
+telegramRouter.get("/telegram/webhook/info", auth, requireRole("admin"), async (_req: AuthedRequest, res) => {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) {
+    res.status(400).json({ message: "TELEGRAM_BOT_TOKEN не задан" });
+    return;
+  }
+
+  const secret = process.env.TELEGRAM_WEBHOOK_SECRET?.trim();
+  const response = await fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`);
+  const data = (await response.json()) as { ok?: boolean; result?: Record<string, unknown> };
+  const info = data?.result || {};
+
+  res.json({
+    secretConfigured: Boolean(secret && secret.length >= 16),
+    botMode: process.env.TELEGRAM_BOT_MODE || "polling",
+    url: String(info.url || ""),
+    pendingUpdateCount: Number(info.pending_update_count || 0),
+    lastErrorMessage: info.last_error_message ? String(info.last_error_message) : undefined,
+    lastErrorDate: info.last_error_date ? Number(info.last_error_date) : undefined
+  });
+});
+
 telegramRouter.all("/telegram/motivation-cron", async (req, res, next) => {
   try {
     if (!authorizeCron(req, res)) return;
