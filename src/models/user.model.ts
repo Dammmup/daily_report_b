@@ -14,6 +14,8 @@ const userSchema = new Schema(
     },
     avatarColor: { type: String, required: true },
     avatarUrl: { type: String, default: "" },
+    // file_unique_id последнего синхронизированного фото из Telegram — чтобы не перезаливать то же фото.
+    telegramAvatarFileUniqueId: { type: String },
     bio: { type: String, default: "" },
     firstLoginCompleted: { type: Boolean, default: false },
     emailVerified: { type: Boolean, default: false },

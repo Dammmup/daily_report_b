@@ -1,9 +1,10 @@
+import { put } from "@vercel/blob";
 import { Markup, Telegraf, type Context } from "telegraf";
 import { hashPassword } from "./auth.js";
 import { askGroqAssistant, askGroqTelegramAssistant, transcribeAudio } from "./ai.js";
 import { categories, randomAvatarColor } from "./constants.js";
 import { addIsoDays, businessDateIso, businessDateTime, businessTime, businessWeekday, isSameBusinessDay } from "./date.js";
-import { PlanChangeModel, PlanModel, ReportModel, TelegramActivityModel, TelegramDraftModel, TelegramGroupModel, UserModel } from "./models.js";
+import { PlanChangeModel, PlanModel, ReportModel, TelegramActivityModel, TelegramDraftModel, TelegramGroupModel, UserModel, type UserDocument } from "./models.js";
 import { createDailyReport, formatLeadSummary } from "./services.js";
 import type { Category } from "./types.js";
 import {
@@ -367,6 +368,47 @@ ${messages.join("\n")}
   return answer ? { ...fallback, summary: answer.slice(0, 700) } : fallback;
 }
 
+// Тянем фото профиля из Telegram и заливаем в Vercel Blob, чтобы показывать на платформе.
+// Не перезаписываем вручную загруженный аватар; одно и то же фото повторно не заливаем.
+async function syncTelegramUserAvatar(telegram: Context["telegram"], user: UserDocument, telegramUserId: string) {
+  if (!process.env.BLOB_READ_WRITE_TOKEN || !process.env.TELEGRAM_BOT_TOKEN) return;
+  if (!telegramUserId || !Number.isFinite(Number(telegramUserId))) return;
+  if (user.avatarUrl && !user.telegramAvatarFileUniqueId) return; // у пользователя свой аватар — не трогаем
+
+  try {
+    const photos = await telegram.getUserProfilePhotos(Number(telegramUserId), 0, 1);
+    const sizes = photos.photos?.[0];
+    if (!sizes || !sizes.length) return; // нет фото или закрыто приватностью
+    const best = sizes[sizes.length - 1];
+    if (user.telegramAvatarFileUniqueId === best.file_unique_id) return; // уже синхронизировано
+
+    const file = await telegram.getFile(best.file_id);
+    if (!file.file_path) return;
+    const response = await fetch(`https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`);
+    if (!response.ok) return;
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (!buffer.length || buffer.length > 5 * 1024 * 1024) return;
+
+    const ext = file.file_path.split(".").pop()?.toLowerCase() || "jpg";
+    const blob = await put(`telegram-avatars/${telegramUserId}-${best.file_unique_id}.${ext}`, buffer, {
+      access: "public",
+      contentType: response.headers.get("content-type") || "image/jpeg",
+      addRandomSuffix: false
+    });
+    user.avatarUrl = blob.url;
+    user.telegramAvatarFileUniqueId = best.file_unique_id;
+  } catch (error) {
+    console.error("Telegram avatar sync error", error);
+  }
+}
+
+// Обёртка для вызова вне bot-контекста (например, из mini-app сессии).
+export async function syncLinkedTelegramAvatar(user: UserDocument, telegramUserId: string) {
+  const bot = getTelegramBot();
+  if (!bot) return;
+  await syncTelegramUserAvatar(bot.telegram, user, telegramUserId);
+}
+
 async function trackGroupText(ctx: Context, text: string) {
   if (ctx.chat?.type !== "group" && ctx.chat?.type !== "supergroup") return;
   if (!ctx.from || ctx.from.is_bot) return;
@@ -375,8 +417,8 @@ async function trackGroupText(ctx: Context, text: string) {
 
   const title = "title" in ctx.chat ? ctx.chat.title : "";
   const existingGroup = await TelegramGroupModel.findOne({ chatId: String(ctx.chat.id) });
+  // Департамент опционален: общий чат на всех стажёров может быть без привязки к департаменту.
   const category = (existingGroup?.category as Category | undefined) || detectCategoryFromGroupTitle(title);
-  if (!category) return;
 
   const now = new Date();
   const chatId = String(ctx.chat.id);
@@ -388,13 +430,15 @@ async function trackGroupText(ctx: Context, text: string) {
     {
       chatId,
       title,
-      category,
       active: true,
-      lastActivityAt: now
+      lastActivityAt: now,
+      ...(category ? { category } : {})
     },
     { upsert: true, returnDocument: "after" }
   );
-  if (!(await shouldUseGroupForDepartmentAnalytics(chatId, category))) return;
+  // Для чата, привязанного к департаменту, считаем активность только из основного чата
+  // (чтобы не задваивать). Общий чат без департамента трекаем всегда.
+  if (category && !(await shouldUseGroupForDepartmentAnalytics(chatId, category))) return;
 
   let user = await UserModel.findOne({ telegramUserId });
   if (!user && username) user = await UserModel.findOne({ telegramUsername: username });
@@ -402,7 +446,6 @@ async function trackGroupText(ctx: Context, text: string) {
     user = await UserModel.create({
       name: buildTelegramName(ctx.from),
       role: "intern",
-      category,
       avatarColor: randomAvatarColor(),
       firstLoginCompleted: false,
       emailVerified: false,
@@ -410,16 +453,20 @@ async function trackGroupText(ctx: Context, text: string) {
       telegramUsername: username,
       telegramGroupChatId: chatId,
       registrationSource: "telegram_group",
-      passwordHash: hashPassword(`telegram-${telegramUserId}-${Date.now()}`)
+      passwordHash: hashPassword(`telegram-${telegramUserId}-${Date.now()}`),
+      // Департамент не навязываем из общего чата — стажёр выберет его сам или его подтянет слияние.
+      ...(category ? { category } : {})
     });
     group.membersSeen += 1;
     await group.save();
+    // Одноразово подтягиваем фото профиля нового участника (если доступно).
+    await syncTelegramUserAvatar(ctx.telegram, user, telegramUserId);
   } else {
     user.name = user.name || buildTelegramName(ctx.from);
     user.telegramUserId = user.telegramUserId || telegramUserId;
     if (username) user.telegramUsername = username;
     if (!user.telegramGroupChatId || user.category === category) user.telegramGroupChatId = chatId;
-    user.category = user.category || category;
+    if (category && !user.category) user.category = category;
   }
 
   await TelegramActivityModel.create({
@@ -445,7 +492,7 @@ async function trackGroupText(ctx: Context, text: string) {
 
   if (user.telegramActivityMessages === 1) {
     await ctx.reply(
-      `${buildTelegramName(ctx.from)}, я добавил вас в список стажеров департамента. Чтобы завершить регистрацию, откройте личный диалог с ботом и нажмите /start.`,
+      `${buildTelegramName(ctx.from)}, я добавил вас в список стажеров. Чтобы завершить регистрацию, откройте личный диалог с ботом и нажмите /start.`,
       Markup.inlineKeyboard([[Markup.button.url("Открыть бота", `https://t.me/${ctx.botInfo?.username || ""}`)]])
     );
   }
@@ -514,13 +561,9 @@ async function answerGroupQuestion(ctx: Context, text: string) {
 
   const group = await TelegramGroupModel.findOne({ chatId: String(ctx.chat!.id) });
   const category = group?.category as Category | undefined;
-  if (!category) {
-    await ctx.reply("Сначала привяжите группу к департаменту. Тогда я получу рабочий контекст и смогу нормально отвечать, а не гадать по воздуху.", {
-      reply_to_message_id: ctx.message?.message_id
-    } as Parameters<Context["reply"]>[1]);
-    return true;
-  }
-  if (!(await shouldUseGroupForDepartmentAnalytics(String(ctx.chat!.id), category))) {
+  // Общий чат без департамента: отвечаем как дружелюбный ассистент (по общему контексту),
+  // не требуя привязки к департаменту.
+  if (category && !(await shouldUseGroupForDepartmentAnalytics(String(ctx.chat!.id), category))) {
     await replyTemporary(ctx, "Этот чат не выбран основным для департамента. Аналитика и AI-ответы идут из основного чата.", undefined, 12000);
     return true;
   }
@@ -549,8 +592,10 @@ async function answerGroupQuestion(ctx: Context, text: string) {
   await ctx.telegram.sendChatAction(ctx.chat!.id, "typing").catch(() => undefined);
 
   const [plans, interns, reports, recentActivities] = await Promise.all([
-    findActivePlans(category, 5),
-    UserModel.find({ role: "intern", category }).sort({ telegramActivityScore: -1 }).limit(8),
+    category ? findActivePlans(category, 5) : PlanModel.find(activePlanFilter).sort({ createdAt: -1 }).limit(6),
+    category
+      ? UserModel.find({ role: "intern", category }).sort({ telegramActivityScore: -1 }).limit(8)
+      : UserModel.find({ role: "intern" }).sort({ telegramActivityScore: -1 }).limit(10),
     ReportModel.find({ date: todayIso() }).sort({ createdAt: -1 }).limit(20),
     TelegramActivityModel.find({ chatId: String(ctx.chat!.id) }).sort({ messageAt: -1 }).limit(12)
   ]);
@@ -575,7 +620,7 @@ async function answerGroupQuestion(ctx: Context, text: string) {
 ${question}
 
 Рабочий контекст:
-Департамент: ${categories[category]}
+Департамент: ${category ? categories[category] : "общий чат — все департаменты"}
 Активные планы:
 ${plans.map((plan) => `- ${plan.title}, дедлайн ${plan.adjustedDeadline}, версия #${plan.version || 1}`).join("\n") || "нет активных планов"}
 Шаги:
@@ -1071,6 +1116,56 @@ export async function sendWeekdayGroupMotivation() {
   return { sent };
 }
 
+async function buildCommonChatNudge() {
+  const fallback =
+    randomItem([
+      "Не молчим 🙂 Над каким планом сейчас работаете и где залипли? Давайте обсудим.",
+      "Коллеги, делитесь прогрессом: что получилось за сегодня, а что застряло?",
+      "Чат живой? Накидайте, какие задачи сейчас в работе и нужна ли где-то помощь.",
+      "Минутка обсуждения: какой шаг плана сейчас самый сложный? Разберём вместе."
+    ]) || "Коллеги, делитесь прогрессом: что в работе и где нужна помощь?";
+  const ai = await askGroqAssistant(
+    "Сгенерируй одно короткое дружелюбное сообщение (1-2 предложения) для общего рабочего чата стажёров, чтобы оживить обсуждение рабочих планов и задач. Без markdown, по-русски, тепло и по-деловому, можно с лёгким призывом не молчать."
+  );
+  return ai ? ai.slice(0, 300) : fallback;
+}
+
+// Проактивные сообщения бота в общий чат (без департамента): время от времени подкидывает тему,
+// чтобы оживить обсуждение. Throttle — не чаще раза в ~6 часов на чат.
+export async function sendCommonChatEngagement() {
+  const bot = getTelegramBot();
+  if (!bot) throw new Error("Telegram bot is not configured");
+
+  const now = new Date();
+  if (!isBusinessWeekday(now)) return { commonGroups: 0, nudged: 0, skipped: "weekend" as const };
+
+  const groups = await TelegramGroupModel.find(
+    activeGroupQuery({
+      chatId: { $type: "string", $ne: "" },
+      $or: [{ category: { $exists: false } }, { category: null }]
+    })
+  );
+
+  const minGapMs = 6 * 60 * 60 * 1000;
+  let nudged = 0;
+  for (const group of groups) {
+    if (group.commonNudgeLastSentAt && now.getTime() - group.commonNudgeLastSentAt.getTime() < minGapMs) continue;
+    try {
+      const message = await buildCommonChatNudge();
+      await safeGroupSend(bot, group.chatId, (id) => bot.telegram.sendMessage(id, message), group);
+      group.commonNudgeLastSentAt = now;
+      group.lastActivityAt = now;
+      await group.save();
+      nudged += 1;
+    } catch (error) {
+      console.error("Telegram common chat engagement error", error);
+      if (group.chatId) await deactivateGroupAfterSendError(group.chatId, error);
+    }
+  }
+
+  return { commonGroups: groups.length, nudged };
+}
+
 async function sendGroupMotivationNow(ctx: Context) {
   if (!(await requireGroupAdmin(ctx))) return;
   deleteIncomingMessageLater(ctx);
@@ -1104,7 +1199,15 @@ export async function sendRandomTelegramFunReply(options: { forceDue?: boolean }
   if (!bot) throw new Error("Telegram bot is not configured");
 
   const now = new Date();
-  const groups = (await findAllDepartmentTelegramGroups()).filter(
+  // Чаты-по-департаментам + общие чаты без департамента (для последних fun тоже доступен).
+  const departmentGroups = await findAllDepartmentTelegramGroups();
+  const commonGroups = await TelegramGroupModel.find(
+    activeGroupQuery({
+      chatId: { $type: "string", $ne: "" },
+      $or: [{ category: { $exists: false } }, { category: null }]
+    })
+  );
+  const groups = [...departmentGroups, ...commonGroups].filter(
     (group) => group.funEnabled && group.funMedia.length > 0
   );
   let scheduled = 0;
@@ -2080,6 +2183,7 @@ bot.start(async (ctx) => {
           if (ctx.from?.username) user.telegramUsername = ctx.from.username.toLowerCase();
           user.telegramLinkToken = undefined as any;
           user.telegramLinkTokenExpiresAt = undefined as any;
+          await syncTelegramUserAvatar(ctx.telegram, user, String(ctx.from?.id));
           await user.save();
           await ctx.reply(`Telegram привязан к профилю: ${user.name}`, tileKeyboard);
           await ctx.reply("Теперь можно пользоваться меню:", inlineMenu);
@@ -2307,6 +2411,7 @@ bot.start(async (ctx) => {
       user.telegramChatId = String(ctx.chat.id);
       user.telegramUserId = String(ctx.from.id);
       if (ctx.from.username) user.telegramUsername = ctx.from.username.toLowerCase();
+      await syncTelegramUserAvatar(ctx.telegram, user, String(ctx.from.id));
       await user.save();
       await ctx.reply(`Telegram привязан к профилю: ${user.name}`, tileKeyboard);
       await ctx.reply("Теперь можно пользоваться меню:", inlineMenu);

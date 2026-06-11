@@ -5,6 +5,8 @@ import { categories } from "../../constants.js";
 import { TelegramGroupModel, UserModel } from "../../models.js";
 import {
   handleTelegramWebhook,
+  syncLinkedTelegramAvatar,
+  sendCommonChatEngagement,
   sendRandomTelegramFunReply,
   sendTelegramProductivityAutomation,
   sendWeekdayGroupDailyDigests,
@@ -86,6 +88,7 @@ telegramRouter.post("/telegram/mini-app-session", async (req, res) => {
   user.telegramUserId = String(telegramUser.id);
   if (telegramUser.username) user.telegramUsername = telegramUser.username.toLowerCase();
   user.lastActiveAt = new Date();
+  await syncLinkedTelegramAvatar(user, String(telegramUser.id));
   await user.save();
 
   const token = signToken(user);
@@ -219,8 +222,8 @@ telegramRouter.all("/telegram/motivation-cron", async (req, res, next) => {
   try {
     if (!authorizeCron(req, res)) return;
 
-    const result = await sendWeekdayGroupMotivation();
-    res.json({ ok: true, ...result });
+    const [result, engagement] = await Promise.all([sendWeekdayGroupMotivation(), sendCommonChatEngagement()]);
+    res.json({ ok: true, ...result, commonChat: engagement });
   } catch (error) {
     next(error);
   }

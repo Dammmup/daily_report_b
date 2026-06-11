@@ -32,6 +32,7 @@ const telegramGroupSchema = new Schema(
     funNextReplyAt: { type: Date, index: true },
     groupDigestLastSentAt: { type: Date },
     dailyReminderLastSentAt: { type: Date },
+    commonNudgeLastSentAt: { type: Date },
     lastActivityAt: { type: Date }
   },
   { timestamps: true }
