@@ -1,10 +1,10 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { generateVerificationCode, hashCode, hashPassword, passwordNeedsRehash, signToken, verifyPassword } from "../../auth.js";
+import { generateVerificationCode, hashCode, hashPassword, passwordNeedsRehash, signToken, verifyPassword, verifyTelegramLoginWidget } from "../../auth.js";
 import { randomAvatarColor } from "../../constants.js";
 import { sendVerificationEmail } from "../../mailer.js";
 import { UserModel, VerificationCodeModel } from "../../models.js";
-import { loginSchema, requestCodeSchema, verifyEmailSchema } from "../schemas.js";
+import { loginSchema, requestCodeSchema, telegramLoginSchema, verifyEmailSchema } from "../schemas.js";
 import { clearThrottle, consumeThrottle, requestIp } from "../security/auth-throttle.js";
 import { clearSessionCookie, setSessionCookie } from "../security/session-cookie.js";
 import { publicUser } from "../serializers.js";
@@ -251,4 +251,45 @@ authRouter.post("/login", async (req, res) => {
 authRouter.post("/logout", (_req, res) => {
   clearSessionCookie(res);
   res.json({ ok: true });
+});
+
+// Вход через Telegram Login Widget («Войти через Telegram» на странице логина).
+authRouter.post("/telegram", async (req, res) => {
+  const body = telegramLoginSchema.safeParse(req.body);
+  if (!body.success) {
+    res.status(400).json({ message: "Некорректные данные входа через Telegram" });
+    return;
+  }
+
+  const telegramUser = verifyTelegramLoginWidget(req.body as Record<string, unknown>);
+  if (!telegramUser) {
+    res.status(401).json({ message: "Не удалось проверить подпись Telegram" });
+    return;
+  }
+
+  if (!(await allowAuthRequest(req, res, { scope: "telegram-login", identity: String(telegramUser.id), identityLimit: 10, ipLimit: 100 }))) {
+    return;
+  }
+
+  const username = telegramUser.username?.toLowerCase();
+  const user = await UserModel.findOne({
+    $or: [{ telegramUserId: String(telegramUser.id) }, ...(username ? [{ telegramUsername: username }] : [])]
+  });
+
+  if (!user || !user.emailVerified) {
+    res.status(404).json({
+      message: "Telegram не привязан к подтвержденному аккаунту. Сначала привяжите Telegram в профиле или завершите регистрацию."
+    });
+    return;
+  }
+
+  user.telegramUserId = String(telegramUser.id);
+  if (username) user.telegramUsername = username;
+  user.lastActiveAt = new Date();
+  await user.save();
+  await clearThrottle("telegram-login:identity", String(telegramUser.id));
+
+  const token = signToken(user);
+  setSessionCookie(res, token);
+  res.json({ token, user: publicUser(user) });
 });

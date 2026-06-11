@@ -121,3 +121,37 @@ export function verifyTelegramInitData(initData: string) {
     return null;
   }
 }
+
+// Проверка подписи Telegram Login Widget («Войти через Telegram» на сайте).
+// Отличается от Mini App: секрет = SHA256(bot_token), а не HMAC по "WebAppData".
+export function verifyTelegramLoginWidget(input: Record<string, unknown>) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) return null;
+
+  const hash = typeof input.hash === "string" ? input.hash : "";
+  if (!hash) return null;
+
+  const dataCheckString = Object.keys(input)
+    .filter((key) => key !== "hash" && input[key] !== undefined && input[key] !== null)
+    .sort()
+    .map((key) => `${key}=${input[key]}`)
+    .join("\n");
+
+  const secretKey = crypto.createHash("sha256").update(botToken).digest();
+  const calculated = crypto.createHmac("sha256", secretKey).update(dataCheckString).digest("hex");
+  if (calculated.length !== hash.length) return null;
+  const valid = crypto.timingSafeEqual(Buffer.from(calculated, "hex"), Buffer.from(hash, "hex"));
+  if (!valid) return null;
+
+  const authDate = Number(input.auth_date || 0);
+  if (!authDate || Date.now() / 1000 - authDate > 86400) return null;
+
+  if (input.id === undefined || input.id === null) return null;
+  return {
+    id: Number(input.id),
+    username: typeof input.username === "string" ? input.username : undefined,
+    first_name: typeof input.first_name === "string" ? input.first_name : undefined,
+    last_name: typeof input.last_name === "string" ? input.last_name : undefined,
+    photo_url: typeof input.photo_url === "string" ? input.photo_url : undefined
+  };
+}

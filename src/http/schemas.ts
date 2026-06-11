@@ -160,6 +160,16 @@ export const telegramMiniAppSessionSchema = z.object({
   initData: z.string().min(20)
 });
 
+export const telegramLoginSchema = z.object({
+  id: z.union([z.number(), z.string()]),
+  auth_date: z.union([z.number(), z.string()]),
+  hash: z.string().min(10),
+  first_name: z.string().optional(),
+  last_name: z.string().optional(),
+  username: z.string().optional(),
+  photo_url: z.string().optional()
+});
+
 export const assistantPlanFitSchema = z.object({
   question: z.string().min(5).max(1200),
   planId: z.string().optional(),
